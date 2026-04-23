@@ -1,4 +1,4 @@
-data/*.sqlite3
 *.db
 tmp/
 bin/
+.env
