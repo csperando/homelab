@@ -19,6 +19,9 @@ ENV PATH=$PATH:/go/bin
 
 RUN npm install -g pnpm
 
+# Claude
+RUN npm install -g @anthropic-ai/claude-code
+
 # Setup workspace for dev work
 # Existing repos will be cloned into /workspace
 RUN mkdir /root/workspace
