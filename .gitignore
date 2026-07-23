@@ -2,3 +2,5 @@
 tmp/
 bin/
 .env
+/volume/*
+!/volume/.gitkeep

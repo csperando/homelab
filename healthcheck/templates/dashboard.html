@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="10">
+  <title>homelab dev container</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #111; color: #ddd; margin: 2rem; }
+    h1 { font-size: 1.1rem; color: #fff; }
+    h2 { font-size: 0.95rem; color: #9cf; margin-top: 2rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 640px; }
+    td, th { text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; border-bottom: 1px solid #333; }
+    .ok { color: #6f6; }
+    .dirty { color: #fc6; }
+    .clean { color: #6f6; }
+    .muted { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>homelab dev container <span class="ok">&#9679; {{.Status}}</span></h1>
+  <p class="muted">uptime {{.Uptime}} &middot; as of {{.Timestamp}}</p>
+
+  <h2>tools</h2>
+  <table>
+    {{range $name, $version := .ToolVersions}}
+    <tr><td>{{$name}}</td><td>{{$version}}</td></tr>
+    {{end}}
+  </table>
+
+  <h2>resources</h2>
+  <table>
+    <tr><td>workspace disk</td><td>{{.DiskUsed}} / {{.DiskTotal}}</td></tr>
+    <tr><td>memory available</td><td>{{.MemAvail}} / {{.MemTotal}}</td></tr>
+    <tr><td>load average (1/5/15m)</td><td>{{.LoadAvg}}</td></tr>
+  </table>
+
+  <h2>workspace repos</h2>
+  <table>
+    <tr><th>repo</th><th>branch</th><th>status</th></tr>
+    {{range .Repos}}
+    <tr>
+      <td>{{.Path}}</td>
+      <td>{{.Branch}}</td>
+      <td>{{if .Dirty}}<span class="dirty">dirty</span>{{else}}<span class="clean">clean</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="3" class="muted">no repos cloned yet</td></tr>
+    {{end}}
+  </table>
+</body>
+</html>
