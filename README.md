@@ -33,10 +33,10 @@ Override the host path with a `WORKSPACE` variable, e.g. `WORKSPACE=~/code make 
 
 ## Health API
 
-The container runs a small Go service on port `8080`:
+The container runs a small Go service on port `55123`:
 
 ```sh
-curl localhost:8080/healthz
+curl localhost:55123/healthz
 ```
 
 Returns JSON with status, uptime, installed tool versions (Go, Node, npm, pnpm, git), and
@@ -46,4 +46,4 @@ disk usage for `/root/workspace`. Docker's own `HEALTHCHECK` polls this endpoint
 ## Ports
 
 - `5173` — frontend dev server (e.g. Vite/Vue)
-- `8080` — health API
+- `55123` — dashboard/health API

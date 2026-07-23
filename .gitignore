@@ -4,3 +4,4 @@ bin/
 .env
 /volume/*
 !/volume/.gitkeep
+!/volume/.vscode

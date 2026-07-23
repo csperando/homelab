@@ -7,6 +7,9 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"path"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -86,12 +89,30 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isCoveragePath reports whether a /files/ path (already stripped of that
+// prefix) passes through a directory literally named "coverage" — the file
+// server only ever exposes coverage reports, not full repo contents.
+func isCoveragePath(urlPath string) bool {
+	return slices.Contains(strings.Split(path.Clean(urlPath), "/"), "coverage")
+}
+
+func coverageOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isCoveragePath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	http.HandleFunc("/healthz", handleHealthz)
 	http.HandleFunc("/api/status", handleAPIStatus)
 	http.HandleFunc("/", handleDashboard)
+	http.Handle("/files/", http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir)))))
 
-	addr := ":8080"
+	addr := ":55123"
 	log.Printf("homelab-healthcheck listening on %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("healthcheck server failed: %v", err)

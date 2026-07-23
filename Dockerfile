@@ -9,8 +9,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
     sqlite3 \
-    nodejs \
-    npm \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node (apt's ubuntu-shipped nodejs is too old for current pnpm/tooling)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+ && apt-get install -y nodejs \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
@@ -38,15 +42,16 @@ RUN mkdir /root/workspace
 
 WORKDIR /root/workspace
 
-COPY .vscode .vscode
+# .vscode lives in ./volume (bind-mounted here at runtime), not baked into the image —
+# anything COPY'd to /root/workspace would be shadowed by the mount anyway.
 
 # Default vue port for frontend development
 EXPOSE 5173
 # Healthcheck API
-EXPOSE 8080
+EXPOSE 55123
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/healthz || exit 1
+    CMD curl -f http://localhost:55123/healthz || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]

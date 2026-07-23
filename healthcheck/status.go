@@ -27,9 +27,10 @@ type memInfo struct {
 }
 
 type repoStatus struct {
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
-	Dirty  bool   `json:"dirty"`
+	Path     string           `json:"path"`
+	Branch   string           `json:"branch"`
+	Dirty    bool             `json:"dirty"`
+	Coverage []coverageReport `json:"coverage,omitempty"`
 }
 
 type statusData struct {
@@ -128,9 +129,10 @@ func scanWorkspaceRepos() []repoStatus {
 		dirty := err == nil && len(strings.TrimSpace(string(dirtyOut))) > 0
 
 		repos = append(repos, repoStatus{
-			Path:   entry.Name(),
-			Branch: branch,
-			Dirty:  dirty,
+			Path:     entry.Name(),
+			Branch:   branch,
+			Dirty:    dirty,
+			Coverage: findCoverageReports(repoPath),
 		})
 	}
 	return repos
@@ -145,8 +147,9 @@ func gatherStatus() statusData {
 			"go":   toolVersion("go", "version"),
 			"node": toolVersion("node", "--version"),
 			"npm":  toolVersion("npm", "--version"),
-			"pnpm": toolVersion("pnpm", "--version"),
-			"git":  toolVersion("git", "--version"),
+			"pnpm":   toolVersion("pnpm", "--version"),
+			"git":    toolVersion("git", "--version"),
+			"claude": toolVersion("claude", "--version"),
 		},
 		Workspace: workspaceDiskUsage(),
 		Memory:    readMemInfo(),

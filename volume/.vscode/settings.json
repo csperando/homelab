@@ -4,5 +4,6 @@
     "editor.fontSize": 12,
     "security.workspace.trust.untrustedFiles": "open",
     "claudeCode.preferredLocation": "panel",
-    "workbench.editor.enablePreview": false
+    "workbench.editor.enablePreview": false,
+    "terminal.integrated.cwd": "/root/workspace"
 }

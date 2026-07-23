@@ -15,7 +15,7 @@ run:
 		docker run -dit \
 			--name $(CONTAINER) \
 			-p 5173:5173 \
-			-p 8080:8080 \
+			-p 55123:55123 \
 			-v $(WORKSPACE):/root/workspace \
 			$(IMAGE); \
 	fi

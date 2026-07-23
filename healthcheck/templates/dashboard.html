@@ -36,15 +36,25 @@
 
   <h2>workspace repos</h2>
   <table>
-    <tr><th>repo</th><th>branch</th><th>status</th></tr>
+    <tr><th>repo</th><th>branch</th><th>status</th><th>coverage</th></tr>
     {{range .Repos}}
     <tr>
       <td>{{.Path}}</td>
       <td>{{.Branch}}</td>
-      <td>{{if .Dirty}}<span class="dirty">dirty</span>{{else}}<span class="clean">clean</span>{{end}}</td>
+      <td>{{if .Dirty}}<span class="dirty" title="uncommitted changes present (git status --porcelain is non-empty)">dirty</span>{{else}}<span class="clean" title="no uncommitted changes (git status --porcelain is empty)">clean</span>{{end}}</td>
+      <td>
+        {{if .Coverage}}
+          {{$multi := gt (len .Coverage) 1}}
+          {{range .Coverage}}
+            {{if $multi}}{{.Path}}: {{end}}{{if lt .Percent 0.0}}{{if .ReportURL}}<a class="muted" href="{{.ReportURL}}" target="_blank" rel="noopener">report (no summary)</a>{{else}}<span class="muted">found (no summary)</span>{{end}}{{else}}{{if .ReportURL}}<a href="{{.ReportURL}}" target="_blank" rel="noopener">{{printf "%.1f%%" .Percent}}</a>{{else}}{{printf "%.1f%%" .Percent}}{{end}}{{end}}<br>
+          {{end}}
+        {{else}}
+          <span class="muted">&mdash;</span>
+        {{end}}
+      </td>
     </tr>
     {{else}}
-    <tr><td colspan="3" class="muted">no repos cloned yet</td></tr>
+    <tr><td colspan="4" class="muted">no repos cloned yet</td></tr>
     {{end}}
   </table>
 </body>
