@@ -15,6 +15,7 @@ services:
     ports:
       - "5173:5173"
       - "55123:55123"
+      - "3000:3000"
     volumes:
       - ${WORKSPACE:-./volume}:/root/workspace
     healthcheck:

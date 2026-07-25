@@ -49,6 +49,8 @@ WORKDIR /root/workspace
 
 # Default vue port for frontend development
 EXPOSE 5173
+# Default api port
+EXPOSE 3000
 # Healthcheck API
 EXPOSE 55123
 
