@@ -29,6 +29,7 @@ RUN npm install -g pnpm
 
 # Claude
 RUN npm install -g @anthropic-ai/claude-code
+COPY .claude /root/.claude
 
 # Lightweight Go API providing container healthchecks
 COPY healthcheck /root/healthcheck

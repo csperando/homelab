@@ -14,6 +14,8 @@ run:
 	mkdir -p $(WORKSPACE)
 	WORKSPACE=$(WORKSPACE) docker compose up -d
 
+start: clean build run
+
 stop:
 	docker compose stop
 

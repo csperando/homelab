@@ -5,5 +5,8 @@
     "security.workspace.trust.untrustedFiles": "open",
     "claudeCode.preferredLocation": "panel",
     "workbench.editor.enablePreview": false,
-    "terminal.integrated.cwd": "/root/workspace"
+    "terminal.integrated.cwd": "/root/workspace",
+    "files.exclude": {
+        "infra": true
+    }
 }
