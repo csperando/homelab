@@ -29,7 +29,10 @@ RUN npm install -g pnpm
 
 # Claude
 RUN npm install -g @anthropic-ai/claude-code
-COPY .claude /root/.claude
+# Baked-in defaults (settings, skills) — seeded into /root/.claude at container
+# start rather than COPY'd there directly, since that path is bind-mounted at
+# runtime to persist auth/session state across container recreation.
+COPY .claude /opt/claude-defaults
 
 # Lightweight Go API providing container healthchecks
 COPY healthcheck /root/healthcheck

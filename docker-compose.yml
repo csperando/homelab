@@ -18,6 +18,7 @@ services:
       - "3000:3000"
     volumes:
       - ${WORKSPACE:-./volume}:/root/workspace
+      - ./volume/infra/claude:/root/.claude
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:55123/healthz"]
       interval: 30s
