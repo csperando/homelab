@@ -1,7 +1,17 @@
+networks:
+  homelab-net:
+    name: homelab-net
+
+include:
+  - services/postgres/compose.yml
+
 services:
   homelab:
     build: .
     container_name: homelab
+    networks: [homelab-net]
+    env_file:
+      - .env
     ports:
       - "5173:5173"
       - "55123:55123"

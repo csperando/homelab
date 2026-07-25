@@ -1,27 +1,21 @@
-IMAGE := homelab
 CONTAINER := homelab
 WORKSPACE ?= $(CURDIR)/volume
 
 .PHONY: build run stop restart shell logs clean
 
 build:
-	docker build -t $(IMAGE) .
+	docker compose build
 
 run:
-	@if [ -n "$$(docker ps -aq -f name=^/$(CONTAINER)$$)" ]; then \
-		docker start $(CONTAINER); \
-	else \
-		mkdir -p $(WORKSPACE); \
-		docker run -dit \
-			--name $(CONTAINER) \
-			-p 5173:5173 \
-			-p 55123:55123 \
-			-v $(WORKSPACE):/root/workspace \
-			$(IMAGE); \
+	@if [ ! -f .env ]; then \
+		cp .env.sample .env; \
+		echo "No .env found — seeded one from .env.sample."; \
 	fi
+	mkdir -p $(WORKSPACE)
+	WORKSPACE=$(WORKSPACE) docker compose up -d
 
 stop:
-	docker stop $(CONTAINER)
+	docker compose stop
 
 restart: stop run
 
@@ -29,7 +23,7 @@ shell:
 	docker exec -it $(CONTAINER) bash
 
 logs:
-	docker logs -f $(CONTAINER)
+	docker compose logs -f homelab
 
 clean:
-	-docker rm -f $(CONTAINER)
+	docker compose down
