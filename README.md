@@ -43,6 +43,10 @@ cloned repos and work survive container restarts/rebuilds. Its contents are giti
 Override the host path with a `WORKSPACE` variable, e.g. `WORKSPACE=~/code make run` or
 `WORKSPACE=~/code docker compose up -d`.
 
+Claude Code's login/session state is separately persisted via `./volume/infra/claude`,
+bind-mounted to `/root/.claude` — so `claude login` only needs to happen once per machine,
+not once per container recreation.
+
 ## Infrastructure Services
 
 Homelab owns a shared Docker network, `homelab-net`, connecting the Homelab container to
@@ -78,11 +82,18 @@ The container runs a small Go service on port `55123`:
 curl localhost:55123/healthz
 ```
 
-Returns JSON with status, uptime, installed tool versions (Go, Node, npm, pnpm, git), and
-disk usage for `/root/workspace`. Docker's own `HEALTHCHECK` polls this endpoint, so
-`docker ps` / `docker compose ps` reflect container health directly.
+`/healthz` is a cheap liveness check — Docker's own `HEALTHCHECK` polls it, so `docker ps`
+/ `docker compose ps` reflect container health directly.
+
+`/` serves an HTML dashboard, and `/api/status` returns the same data as JSON: status,
+uptime, installed tool versions (Go, Node, npm, pnpm, git, Claude Code), memory and load
+average, disk usage for `/root/workspace`, and, for each git repo found one level deep
+under the workspace, its branch/dirty state plus any test-coverage percentage found
+(parsed from Istanbul `coverage-summary.json` or `lcov.info`). Coverage HTML reports are
+served read-only under `/files/`.
 
 ## Ports
 
 - `5173` — frontend dev server (e.g. Vite/Vue)
+- `3000` — API dev server
 - `55123` — dashboard/health API

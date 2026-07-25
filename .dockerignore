@@ -2,3 +2,4 @@
 *.md
 .DS_Store
 !.claude/**/*.md
+healthcheck/healthcheck

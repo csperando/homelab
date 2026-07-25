@@ -2,6 +2,7 @@
 tmp/
 bin/
 .env
+/healthcheck/healthcheck
 /volume/*
 !/volume/.gitkeep
 !/volume/.vscode
