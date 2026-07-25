@@ -7,6 +7,14 @@ persistent workspace and a built-in health API.
 
 Via `make`:
 
+### Primary 
+
+```sh
+make start   # clean build run
+```
+
+### Additional Commands
+
 ```sh
 make build   # build the image
 make run     # start (or resume) the container
