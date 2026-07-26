@@ -74,6 +74,21 @@ and persists independently of the Homelab container (survives `make stop`/`make 
 
 No changes to the network or to other services' definitions are needed.
 
+**Dashboard visibility**
+
+The dashboard (see [Health API](#health-api)) can list every infra service running on
+`homelab-net`, auto-discovered with zero code changes as services are added. It's off by
+default — enabling it requires bind-mounting the host's Docker socket into the container,
+which is an opt-in privilege increase, since it grants read-only visibility into *every*
+container on the host, not just this project's. To enable it, set in your `.env`:
+
+```sh
+DOCKER_SOCK_PATH=/var/run/docker.sock
+```
+
+then recreate the container (`make restart` or `docker compose up -d`). Leave it unset to
+keep the socket unmounted (the dashboard shows an explicit disabled state instead).
+
 ## Health API
 
 The container runs a small Go service on port `55123`:
@@ -90,7 +105,9 @@ uptime, installed tool versions (Go, Node, npm, pnpm, git, Claude Code), memory 
 average, disk usage for `/root/workspace`, and, for each git repo found one level deep
 under the workspace, its branch/dirty state plus any test-coverage percentage found
 (parsed from Istanbul `coverage-summary.json` or `lcov.info`). Coverage HTML reports are
-served read-only under `/files/`.
+served read-only under `/files/`. It also lists infra services running on `homelab-net`
+(name, image, status, port, uptime) when the `DOCKER_SOCK_PATH` opt-in described above is
+enabled.
 
 ## Ports
 
