@@ -158,3 +158,35 @@ func discoverDockerServices(ctx context.Context) ([]dockerService, error) {
 	}
 	return services, nil
 }
+
+// dockerStatus is the dashboard-facing result of a docker discovery
+// attempt: either a populated, enabled service list, or a disabled state
+// with a human-readable reason (socket not mounted, API error, etc.).
+type dockerStatus struct {
+	Enabled  bool            `json:"enabled"`
+	Services []dockerService `json:"services,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+}
+
+// gatherDockerStatus degrades gracefully rather than erroring: if the
+// socket isn't mounted (the default — see docker-compose.yml's
+// DOCKER_SOCK_PATH opt-in) or the API query fails for any reason, it
+// returns a disabled result with an explanatory reason instead of
+// propagating an error, consistent with the zero-value-on-error pattern
+// used elsewhere in this package (e.g. workspaceDiskUsage, readMemInfo).
+// Note that /healthz never calls this — only /api/status and the
+// dashboard do — so a slow or unreachable daemon can't affect the cheap
+// liveness check Docker's own HEALTHCHECK polls.
+func gatherDockerStatus() dockerStatus {
+	info, err := os.Stat(dockerSocketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return dockerStatus{Reason: "docker socket not mounted (set DOCKER_SOCK_PATH in .env to enable)"}
+	}
+
+	services, err := discoverDockerServices(context.Background())
+	if err != nil {
+		return dockerStatus{Reason: fmt.Sprintf("docker api query failed: %v", err)}
+	}
+
+	return dockerStatus{Enabled: true, Services: services}
+}
