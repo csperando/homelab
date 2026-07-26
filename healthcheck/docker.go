@@ -180,7 +180,7 @@ type dockerStatus struct {
 func gatherDockerStatus() dockerStatus {
 	info, err := os.Stat(dockerSocketPath)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
-		return dockerStatus{Reason: "docker socket not mounted (set DOCKER_SOCK_PATH in .env to enable)"}
+		return dockerStatus{Reason: "Disabled"}
 	}
 
 	services, err := discoverDockerServices(context.Background())
