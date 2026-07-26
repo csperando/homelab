@@ -19,6 +19,7 @@ services:
     volumes:
       - ${WORKSPACE:-./volume}:/root/workspace
       - ./volume/infra/claude:/root/.claude
+      - ${DOCKER_SOCK_PATH:-/dev/null}:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:55123/healthz"]
       interval: 30s
