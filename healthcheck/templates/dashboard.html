@@ -57,5 +57,29 @@
     <tr><td colspan="4" class="muted">no repos cloned yet</td></tr>
     {{end}}
   </table>
+
+  <h2>infra services</h2>
+  <table>
+    <tr><th>service</th><th>image</th><th>status</th><th>port</th><th>uptime</th></tr>
+    {{if .Docker.Enabled}}
+      {{range .Docker.Services}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td>{{.Image}}</td>
+        <td>
+          {{if eq .Health "healthy"}}<span class="ok">{{.State}} (healthy)</span>
+          {{else if eq .Health "unhealthy"}}<span class="dirty">{{.State}} (unhealthy)</span>
+          {{else}}{{.State}}{{end}}
+        </td>
+        <td>{{if .Ports}}{{range $i, $p := .Ports}}{{if $i}}, {{end}}{{$p}}{{end}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+        <td>{{.Uptime}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="5" class="muted">no infra services found on homelab-net</td></tr>
+      {{end}}
+    {{else}}
+    <tr><td colspan="5" class="muted" title="opt in via DOCKER_SOCK_PATH in .env">{{.Docker.Reason}}</td></tr>
+    {{end}}
+  </table>
 </body>
 </html>
