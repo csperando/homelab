@@ -29,6 +29,7 @@ type dashboardView struct {
 	MemTotal     string
 	LoadAvg      string
 	Repos        []repoStatus
+	Docker       dockerStatus
 }
 
 func formatBytes(b uint64) string {
@@ -60,6 +61,7 @@ func toView(s statusData) dashboardView {
 		MemTotal:     formatKB(s.Memory.TotalKB),
 		LoadAvg:      s.LoadAvg,
 		Repos:        s.Repos,
+		Docker:       s.Docker,
 	}
 }
 

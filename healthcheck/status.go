@@ -42,6 +42,7 @@ type statusData struct {
 	Memory       memInfo           `json:"memory"`
 	LoadAvg      string            `json:"load_avg"`
 	Repos        []repoStatus      `json:"repos"`
+	Docker       dockerStatus      `json:"docker"`
 }
 
 func toolVersion(name string, args ...string) string {
@@ -155,5 +156,6 @@ func gatherStatus() statusData {
 		Memory:    readMemInfo(),
 		LoadAvg:   readLoadAvg(),
 		Repos:     scanWorkspaceRepos(),
+		Docker:    gatherDockerStatus(),
 	}
 }
