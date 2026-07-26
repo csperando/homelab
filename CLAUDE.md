@@ -104,8 +104,8 @@ A small embedded Go HTTP service, split by concern:
 
 ### Claude Code skills (`.claude/skills/`)
 
-This repo's own Claude Code workflow for developing *itself*, driven by two ephemeral
-files under `.claude/tmp/` (gitignored):
+This repo's own Claude Code workflow for developing *itself*, driven by ephemeral files
+under `.claude/tmp/` (gitignored):
 - `set-goal` → writes `.claude/tmp/goal.md`: terse technical bullets (problem, scope,
   success criteria), never leaking specifics from gitignored/private paths (e.g. the
   workspace mount) into this tracked-repo file.
@@ -114,7 +114,14 @@ files under `.claude/tmp/` (gitignored):
 - `tdd` → executes `plan.md` one item at a time — write test first (API/jest/supertest
   level only, skipped for frontend work), implement, run the full test suite (up to 3 fix
   attempts), one git commit per completed item, then delete that item from `plan.md`
-  immediately after committing.
+  immediately after committing. Records the starting commit SHA in
+  `.claude/tmp/tdd-start-sha` on first run (deleted once `plan.md` empties out) to mark the
+  range of commits made during this plan.
+- `fix-plan` → standalone recovery skill for when tdd execution hits an unexpected issue.
+  Given a description of the problem plus goal.md/plan.md and the git history bounded by
+  `tdd-start-sha`, diagnoses whether the remaining plan can route around it or whether
+  already-committed work needs rolling back, then rewrites `plan.md` accordingly. Never
+  runs git itself — only recommends commands for the user to run.
 
 ### Ports
 
