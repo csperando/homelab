@@ -50,8 +50,9 @@ not once per container recreation.
 ## Infrastructure Services
 
 Homelab owns a shared Docker network, `homelab-net`, connecting the Homelab container to
-infra service containers it manages. Services are never published to the host — reach
-them from inside the Homelab container only, by their service name (DNS hostname).
+infra service containers it manages. ~~Services are never published to the host — reach
+them from inside the Homelab container only, by their service name (DNS hostname).~~
+This is a good security practice, but if you are like me and want to use db tools like TablePlus, the you will need to add ports to compose.yml
 
 **Postgres** — `postgres:5432`
 
@@ -68,9 +69,9 @@ and persists independently of the Homelab container (survives `make stop`/`make 
 **Adding a service**
 
 1. Create `services/<name>/compose.yml`, following `services/postgres/compose.yml` as a
-   template: attach to `networks: [homelab-net]`, use `expose:` (never `ports:`), and
-   bind-mount any persistent data under `./volume/infra/<name>`.
-2. Add one line to the root `docker-compose.yml`'s `include:` list.
+   template: attach to `networks: [homelab-net]`, use `expose:` ~~(never `ports:`)~~. Sometimes I use ports...
+2. Bind-mount any persistent data under `./volume/infra/<name>`.
+3. Add one line to the root `docker-compose.yml`'s `include:` list.
 
 No changes to the network or to other services' definitions are needed.
 
