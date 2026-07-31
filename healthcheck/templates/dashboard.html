@@ -81,5 +81,19 @@
     <tr><td colspan="5" class="muted" title="opt in via DOCKER_SOCK_PATH in .env">{{.Docker.Reason}}</td></tr>
     {{end}}
   </table>
+
+  <h2>subagents</h2>
+  <table>
+    <tr><th>id</th><th>type</th><th>running for</th></tr>
+    {{range .Agents}}
+    <tr>
+      <td title="{{.ID}}">{{.ShortID}}</td>
+      <td>{{.Type}}</td>
+      <td>{{.RunningFor}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="3" class="muted">no subagents running</td></tr>
+    {{end}}
+  </table>
 </body>
 </html>
