@@ -30,6 +30,37 @@ type dashboardView struct {
 	LoadAvg      string
 	Repos        []repoStatus
 	Docker       dockerStatus
+	Agents       []agentView
+}
+
+// agentView is the dashboard-facing, pre-formatted view of a runningAgent.
+type agentView struct {
+	ID         string
+	ShortID    string
+	Type       string
+	RunningFor string
+}
+
+// shortID truncates an id for compact table display, e.g. an agent_id UUID.
+func shortID(id string) string {
+	const n = 8
+	if len(id) <= n {
+		return id
+	}
+	return id[:n]
+}
+
+func toAgentViews(agents []runningAgent) []agentView {
+	views := make([]agentView, len(agents))
+	for i, a := range agents {
+		views[i] = agentView{
+			ID:         a.ID,
+			ShortID:    shortID(a.ID),
+			Type:       a.Type,
+			RunningFor: time.Since(a.StartedAt).Round(time.Second).String(),
+		}
+	}
+	return views
 }
 
 func formatBytes(b uint64) string {
@@ -62,6 +93,7 @@ func toView(s statusData) dashboardView {
 		LoadAvg:      s.LoadAvg,
 		Repos:        s.Repos,
 		Docker:       s.Docker,
+		Agents:       toAgentViews(s.Agents),
 	}
 }
 
