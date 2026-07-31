@@ -48,10 +48,12 @@ NodeSource, since Ubuntu's packaged Node is too old for current pnpm/tooling) �
 (`dlv`, `golangci-lint`) → `pnpm` → Claude Code CLI → the healthcheck binary (built
 in-image from `healthcheck/`) → `entrypoint.sh`.
 
-Claude Code's tracked defaults (`.claude/settings.local.json`, `.claude/skills/`) are
-`COPY`'d to `/opt/claude-defaults`, *not* directly to `/root/.claude` — that path is
-bind-mounted at runtime (see below), so anything placed there at build time would be
-shadowed by the mount.
+Claude Code's defaults (`.claude/skills/`, and `.claude/settings.local.json` if present —
+that file is untracked, blanket-ignored by convention since it can hold machine-specific
+config like absolute paths, but still gets baked in from whatever's on disk at build time
+on the machine running `docker build`) are `COPY`'d to `/opt/claude-defaults`, *not*
+directly to `/root/.claude` — that path is bind-mounted at runtime (see below), so
+anything placed there at build time would be shadowed by the mount.
 
 ### Runtime composition (`docker-compose.yml` + `services/*/compose.yml`)
 
@@ -76,7 +78,7 @@ shadowed by the mount.
 
 Runs before the container's `CMD`. Responsibilities, in order:
 1. Seed `/root/.claude` from the baked-in `/opt/claude-defaults` using `cp -rn` (no
-   clobber) — populates tracked settings/skills on first boot without ever overwriting
+   clobber) — populates default settings/skills on first boot without ever overwriting
    runtime state (credentials, sessions) already present in the mounted volume.
 2. Ensure `/root/.claude/claude.json` exists and is valid JSON (`{}` minimum — an empty
    file causes a JSON parse error at Claude Code startup), then symlink the root-level
