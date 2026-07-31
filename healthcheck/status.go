@@ -43,6 +43,7 @@ type statusData struct {
 	LoadAvg      string            `json:"load_avg"`
 	Repos        []repoStatus      `json:"repos"`
 	Docker       dockerStatus      `json:"docker"`
+	Agents       []runningAgent    `json:"agents"`
 }
 
 func toolVersion(name string, args ...string) string {
@@ -157,5 +158,6 @@ func gatherStatus() statusData {
 		LoadAvg:   readLoadAvg(),
 		Repos:     scanWorkspaceRepos(),
 		Docker:    gatherDockerStatus(),
+		Agents:    gatherAgentStatus(),
 	}
 }
