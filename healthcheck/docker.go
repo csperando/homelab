@@ -13,10 +13,9 @@ import (
 	"time"
 )
 
-const (
-	dockerSocketPath = "/var/run/docker.sock"
-	homelabNetwork   = "homelab-net"
-)
+const homelabNetwork = "homelab-net"
+
+var dockerSocketPath = "/var/run/docker.sock"
 
 // dockerHTTPClient talks to the Docker Engine API over the local Unix
 // socket. It only ever issues GET requests (see dockerGet) — read-only
@@ -117,8 +116,10 @@ func formatContainerPorts(ports []dockerContainerPort) []string {
 // against os.Hostname(), which Docker sets to the container's own short ID
 // by default — robust to a future container_name rename, unlike matching
 // on name).
+var hostnameFunc = os.Hostname
+
 func discoverDockerServices(ctx context.Context) ([]dockerService, error) {
-	hostname, err := os.Hostname()
+	hostname, err := hostnameFunc()
 	if err != nil {
 		return nil, err
 	}

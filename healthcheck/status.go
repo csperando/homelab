@@ -11,9 +11,14 @@ import (
 	"time"
 )
 
-const workspaceDir = "/root/workspace"
+var workspaceDir = "/root/workspace"
 
 var startTime = time.Now()
+
+var (
+	procMeminfoPath = "/proc/meminfo"
+	procLoadavgPath = "/proc/loadavg"
+)
 
 type diskUsage struct {
 	TotalBytes uint64 `json:"total_bytes"`
@@ -68,7 +73,7 @@ func workspaceDiskUsage() diskUsage {
 }
 
 func readMemInfo() memInfo {
-	f, err := os.Open("/proc/meminfo")
+	f, err := os.Open(procMeminfoPath)
 	if err != nil {
 		return memInfo{}
 	}
@@ -92,11 +97,14 @@ func readMemInfo() memInfo {
 			mi.AvailKB = val
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return memInfo{}
+	}
 	return mi
 }
 
 func readLoadAvg() string {
-	data, err := os.ReadFile("/proc/loadavg")
+	data, err := os.ReadFile(procLoadavgPath)
 	if err != nil {
 		return "unavailable"
 	}

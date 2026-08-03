@@ -130,6 +130,9 @@ func parseLcov(path string) (float64, bool) {
 			hit += parseInt64(line[len("LH:"):])
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return 0, false
+	}
 	if found == 0 {
 		return 0, false
 	}

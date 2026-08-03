@@ -1,10 +1,13 @@
 CONTAINER := homelab
 WORKSPACE ?= $(CURDIR)/volume
 
-.PHONY: build run stop restart shell logs clean
+.PHONY: build run stop restart shell logs clean test
 
 build:
 	docker compose build
+
+test:
+	cd healthcheck && go test -v ./...
 
 run:
 	@if [ ! -f .env ]; then \
