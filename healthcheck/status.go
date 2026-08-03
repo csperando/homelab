@@ -43,7 +43,6 @@ type statusData struct {
 	LoadAvg      string            `json:"load_avg"`
 	Repos        []repoStatus      `json:"repos"`
 	Docker       dockerStatus      `json:"docker"`
-	Agents       []runningAgent    `json:"agents"`
 }
 
 func toolVersion(name string, args ...string) string {
@@ -146,9 +145,9 @@ func gatherStatus() statusData {
 		UptimeSecs: time.Since(startTime).Seconds(),
 		Timestamp:  time.Now().UTC(),
 		ToolVersions: map[string]string{
-			"go":   toolVersion("go", "version"),
-			"node": toolVersion("node", "--version"),
-			"npm":  toolVersion("npm", "--version"),
+			"go":     toolVersion("go", "version"),
+			"node":   toolVersion("node", "--version"),
+			"npm":    toolVersion("npm", "--version"),
 			"pnpm":   toolVersion("pnpm", "--version"),
 			"git":    toolVersion("git", "--version"),
 			"claude": toolVersion("claude", "--version"),
@@ -158,6 +157,5 @@ func gatherStatus() statusData {
 		LoadAvg:   readLoadAvg(),
 		Repos:     scanWorkspaceRepos(),
 		Docker:    gatherDockerStatus(),
-		Agents:    gatherAgentStatus(),
 	}
 }
