@@ -6,6 +6,7 @@ include:
   - services/postgres/compose.yml
   - services/nginx/compose.yml
   - services/redis/compose.yml
+  - services/ollama/compose.yml
 
 services:
   homelab:
