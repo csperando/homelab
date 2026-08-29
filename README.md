@@ -51,6 +51,12 @@ docker compose down
 `docker compose up -d` also starts the infra services (Postgres) via `include:` — no
 `-f` flags needed, and no separate step to bring them up.
 
+## Changing this repo
+
+Work on a branch, open a PR (CI runs `go test` + an image build), merge to `main`. Merging
+builds and pushes `ghcr.io/csperando/homelab` and auto-deploys it to the dev server via a
+self-hosted runner. Full runbook: [`docs/deploy.md`](docs/deploy.md).
+
 Both paths mount `./volume` (in this repo) to `/root/workspace` in the container, so
 cloned repos and work survive container restarts/rebuilds. Its contents are gitignored.
 Override the host path with a `WORKSPACE` variable, e.g. `WORKSPACE=~/code make run` or
