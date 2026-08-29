@@ -83,3 +83,28 @@ jobs:
           mkdir -p "$DEPLOY_DIR"
           rsync -a docker-compose.yml docker-compose.prod.yml Makefile "$DEPLOY_DIR/"
           rsync -a --delete services/ "$DEPLOY_DIR/services/"
+
+      - name: write .env from secret
+        env:
+          ENV_FILE: ${{ secrets.ENV }}
+        run: |
+          umask 077
+          printf '%s' "$ENV_FILE" > "$DEPLOY_DIR/.env"
+          chmod 600 "$DEPLOY_DIR/.env"
+
+      - name: record currently-running image
+        run: |
+          prior=$(docker inspect --format '{{.Config.Image}}' homelab 2>/dev/null || echo '(none)')
+          echo "PRIOR_IMAGE=$prior" >> "$GITHUB_ENV"
+          echo "Currently running: $prior"
+
+      - name: log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: pull and (re)start the stack
+        run: make -C "$DEPLOY_DIR" deploy
+
+      - name: prune dangling images
+        run: docker image prune -f
