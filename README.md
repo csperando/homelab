@@ -35,8 +35,10 @@ make deploy HOMELAB_TAG=sha-abc1234  # pin/roll back to a specific build
 ```
 
 `make deploy` uses `docker-compose.prod.yml` (published image, `restart: unless-stopped`
-on infra). CI runs it automatically on merges to `main`; see `docs/deploy.md`. Never run
-`make build` / `make start` on a server — they rebuild the image locally.
+on infra). Merges to `main` deploy automatically via a self-hosted runner (into
+`~/homelab`); one-time server setup is `scripts/bootstrap-server.sh`. See
+[`docs/deploy.md`](docs/deploy.md). Never run `make build` / `make start` on a server —
+they rebuild the image locally.
 
 Via Docker Compose:
 
