@@ -56,3 +56,30 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-push
+    # Run after a successful build, or straight away on a rollback dispatch that
+    # skipped the build. Never on a fork of this repo (self-hosted runner safety).
+    if: >-
+      !cancelled()
+      && github.repository == 'csperando/homelab'
+      && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped')
+    runs-on: [self-hosted, linux, X64]
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    env:
+      DEPLOY_DIR: /opt/homelab
+      HOMELAB_TAG: ${{ needs.build-push.outputs.tag || inputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: sync compose config to ${{ env.DEPLOY_DIR }}
+        run: |
+          mkdir -p "$DEPLOY_DIR"
+          rsync -a docker-compose.yml docker-compose.prod.yml Makefile "$DEPLOY_DIR/"
+          rsync -a --delete services/ "$DEPLOY_DIR/services/"
