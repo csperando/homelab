@@ -3,3 +3,8 @@
 .DS_Store
 !.claude/**/*.md
 healthcheck/healthcheck
+
+# Runtime state — bind-mounted at run time, never wanted in the build context
+volume
+# Ephemeral skill working files (goal.md/plan.md re-included by the rule above)
+.claude/tmp

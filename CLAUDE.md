@@ -23,6 +23,7 @@ make stop     # docker compose stop
 make restart  # stop + run
 make logs     # follow container logs
 make clean    # docker compose down
+make deploy   # SERVER ONLY: pull the published image and (re)start — never build locally
 ```
 
 Equivalent raw `docker compose` commands work too; `docker compose up -d` also brings up
@@ -35,9 +36,8 @@ image at build time):
 
 ```sh
 cd healthcheck && go build ./...   # verify it compiles
+cd healthcheck && go test ./...    # unit tests (also run by CI on every PR)
 ```
-
-There are no automated tests in this repo currently.
 
 ## Architecture
 
@@ -73,6 +73,25 @@ anything placed there at build time would be shadowed by the mount.
   - `./volume/infra/claude` → `/root/.claude` — persists Claude Code's login/session state
     across container recreation (previously lost on every rebuild/recreate). `.env` /
     `.env.sample` hold Postgres credentials only, loaded via `env_file:`.
+- `docker-compose.prod.yml` is a server-only override: it swaps the `homelab` service's
+  `build:` for `image: ghcr.io/csperando/homelab:${HOMELAB_TAG:-latest}` and adds
+  `restart: unless-stopped` to the infra services. Applied via `make deploy` (which passes
+  both `-f` files). Local dev never uses it.
+
+### CI/CD and server deployment
+
+- `.github/workflows/ci.yml` — on every PR to `main`: `go test`, `docker compose config`
+  validation, and a no-push image build. GitHub-hosted; `contents: read` only.
+- `.github/workflows/deploy.yml` — on push to `main` (or `workflow_dispatch`): a
+  GitHub-hosted `build-push` job builds the multi-arch image and pushes `:latest` +
+  `:sha-<short>` to GHCR, then a `deploy` job **on a self-hosted runner on the dev server**
+  syncs the compose files into `/opt/homelab`, writes `.env` from the `ENV` repo secret,
+  runs `make deploy` pinned to the new `sha-<short>`, and health-checks it. The self-hosted
+  job is gated to `push`/`dispatch` on this repo — never PRs (RCE risk).
+- `.github/workflows/registry-cleanup.yml` — weekly; trims old `sha-*` tags (needs a
+  `GHCR_CLEANUP_TOKEN` PAT secret, inert without it).
+- All action refs are pinned to commit SHAs. Full setup + rollback runbook:
+  `docs/deploy.md`; server bootstrap: `scripts/bootstrap-server.sh`.
 
 ### entrypoint.sh
 
@@ -80,11 +99,15 @@ Runs before the container's `CMD`. Responsibilities, in order:
 1. Seed `/root/.claude` from the baked-in `/opt/claude-defaults` using `cp -rn` (no
    clobber) — populates default settings/skills on first boot without ever overwriting
    runtime state (credentials, sessions) already present in the mounted volume.
-2. Ensure `/root/.claude/claude.json` exists and is valid JSON (`{}` minimum — an empty
+2. Force-refresh only `/root/.claude/skills/` from the image (`rm -rf` + `cp -r`). Skills
+   are image-managed, not runtime state; the `cp -rn` above would otherwise leave a stale
+   copy from an earlier image in the mounted volume, so a freshly pulled image never
+   updated them. Credentials / sessions / settings are untouched.
+3. Ensure `/root/.claude/claude.json` exists and is valid JSON (`{}` minimum — an empty
    file causes a JSON parse error at Claude Code startup), then symlink the root-level
    `/root/.claude.json` to it, since that file lives outside `/root/.claude` but needs the
    same persistence.
-3. Start `homelab-healthcheck` in the background, then `exec` the container's `CMD`.
+4. Start `homelab-healthcheck` in the background, then `exec` the container's `CMD`.
 
 ### Health/dashboard API (`healthcheck/`, port `55123`)
 

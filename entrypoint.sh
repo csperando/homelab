@@ -8,6 +8,15 @@ cp -rn /opt/claude-defaults/. /root/.claude/ 2>/dev/null || true
 [ -s /root/.claude/claude.json ] || echo '{}' > /root/.claude/claude.json
 ln -sf /root/.claude/claude.json /root/.claude.json
 
+# Skills are image-managed, not runtime state: the no-clobber seed above would
+# leave stale skills from an earlier image in place, so a freshly pulled image
+# never updated them. Force-refresh just the skills subtree from the image on
+# every boot, leaving credentials / sessions / settings untouched.
+if [ -d /opt/claude-defaults/skills ]; then
+  rm -rf /root/.claude/skills
+  cp -r /opt/claude-defaults/skills /root/.claude/skills
+fi
+
 # Unlike the seed step above, this state is ephemeral live-status (which
 # Claude Code subagents are currently running, written by the
 # SubagentStart/SubagentStop hooks) and must not survive a restart, so it's

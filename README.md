@@ -25,6 +25,19 @@ make logs    # follow container logs
 make clean   # remove the container
 ```
 
+### Server deployment
+
+On a server, run the pre-built image from GHCR instead of building it:
+
+```sh
+make deploy                          # pull ghcr.io/csperando/homelab:latest + (re)start
+make deploy HOMELAB_TAG=sha-abc1234  # pin/roll back to a specific build
+```
+
+`make deploy` uses `docker-compose.prod.yml` (published image, `restart: unless-stopped`
+on infra). CI runs it automatically on merges to `main`; see `docs/deploy.md`. Never run
+`make build` / `make start` on a server — they rebuild the image locally.
+
 Via Docker Compose:
 
 ```sh
@@ -37,6 +50,12 @@ docker compose down
 
 `docker compose up -d` also starts the infra services (Postgres) via `include:` — no
 `-f` flags needed, and no separate step to bring them up.
+
+## Changing this repo
+
+Work on a branch, open a PR (CI runs `go test` + an image build), merge to `main`. Merging
+builds and pushes `ghcr.io/csperando/homelab` and auto-deploys it to the dev server via a
+self-hosted runner. Full runbook: [`docs/deploy.md`](docs/deploy.md).
 
 Both paths mount `./volume` (in this repo) to `/root/workspace` in the container, so
 cloned repos and work survive container restarts/rebuilds. Its contents are gitignored.

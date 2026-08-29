@@ -1,0 +1,21 @@
+# Production override for the always-on dev server: run the pre-built image from
+# GHCR instead of building locally, and keep the infra services alive across
+# reboots, daemon restarts, and single-container crashes.
+#
+# Use via `make deploy` (which passes both -f files). Never run
+# `docker compose build` / `make build` / `make start` on a server — those would
+# rebuild the image locally instead of using the published one.
+services:
+  homelab:
+    build: !reset null
+    image: ghcr.io/csperando/homelab:${HOMELAB_TAG:-latest}
+    pull_policy: always
+
+  postgres:
+    restart: unless-stopped
+  nginx:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  ollama:
+    restart: unless-stopped

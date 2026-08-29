@@ -1,0 +1,140 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing image tag to (re)deploy, e.g. sha-abc1234. Leave blank to build and deploy this commit."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    # Skip the build on a rollback dispatch that names an existing tag.
+    if: github.event_name == 'push' || inputs.tag == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+
+      - uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - id: meta
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
+        with:
+          images: ghcr.io/csperando/homelab
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-push
+    # Run after a successful build, or straight away on a rollback dispatch that
+    # skipped the build. Never on a fork of this repo (self-hosted runner safety).
+    if: >-
+      !cancelled()
+      && github.repository == 'csperando/homelab'
+      && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped')
+    runs-on: [self-hosted, linux, X64]
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    env:
+      DEPLOY_DIR: /opt/homelab
+      HOMELAB_TAG: ${{ needs.build-push.outputs.tag || inputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: sync compose config to ${{ env.DEPLOY_DIR }}
+        run: |
+          mkdir -p "$DEPLOY_DIR"
+          rsync -a docker-compose.yml docker-compose.prod.yml Makefile "$DEPLOY_DIR/"
+          rsync -a --delete services/ "$DEPLOY_DIR/services/"
+
+      - name: write .env from secret
+        env:
+          ENV_FILE: ${{ secrets.ENV }}
+        run: |
+          umask 077
+          printf '%s' "$ENV_FILE" > "$DEPLOY_DIR/.env"
+          chmod 600 "$DEPLOY_DIR/.env"
+
+      - name: record currently-running image
+        run: |
+          prior=$(docker inspect --format '{{.Config.Image}}' homelab 2>/dev/null || echo '(none)')
+          echo "PRIOR_IMAGE=$prior" >> "$GITHUB_ENV"
+          echo "Currently running: $prior"
+
+      - name: log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: pull and (re)start the stack
+        run: make -C "$DEPLOY_DIR" deploy
+
+      - name: verify deployment
+        run: |
+          deadline=$((SECONDS + 120))
+          ok=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            health=$(docker inspect --format '{{.State.Health.Status}}' homelab 2>/dev/null || echo unknown)
+            if [ "$health" = healthy ] && curl -fsS -o /dev/null http://localhost:55123/healthz; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          prior_tag="${PRIOR_IMAGE##*:}"
+          {
+            echo "### Deploy"
+            echo ""
+            echo "| | |"
+            echo "|--|--|"
+            echo "| Deployed | \`${HOMELAB_TAG:-latest}\` |"
+            echo "| Previous | \`${PRIOR_IMAGE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ok" ]; then
+            echo "| Result | :white_check_mark: healthy |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Result | :x: not healthy after 120s |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::homelab did not become healthy. Roll back on the server with: make -C ${DEPLOY_DIR} deploy HOMELAB_TAG=${prior_tag}"
+            docker logs --tail 50 homelab || true
+            exit 1
+          fi
+
+      - name: prune dangling images
+        run: docker image prune -f
