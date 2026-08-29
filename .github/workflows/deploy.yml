@@ -106,5 +106,35 @@ jobs:
       - name: pull and (re)start the stack
         run: make -C "$DEPLOY_DIR" deploy
 
+      - name: verify deployment
+        run: |
+          deadline=$((SECONDS + 120))
+          ok=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            health=$(docker inspect --format '{{.State.Health.Status}}' homelab 2>/dev/null || echo unknown)
+            if [ "$health" = healthy ] && curl -fsS -o /dev/null http://localhost:55123/healthz; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          prior_tag="${PRIOR_IMAGE##*:}"
+          {
+            echo "### Deploy"
+            echo ""
+            echo "| | |"
+            echo "|--|--|"
+            echo "| Deployed | \`${HOMELAB_TAG:-latest}\` |"
+            echo "| Previous | \`${PRIOR_IMAGE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ok" ]; then
+            echo "| Result | :white_check_mark: healthy |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Result | :x: not healthy after 120s |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::homelab did not become healthy. Roll back on the server with: make -C ${DEPLOY_DIR} deploy HOMELAB_TAG=${prior_tag}"
+            docker logs --tail 50 homelab || true
+            exit 1
+          fi
+
       - name: prune dangling images
         run: docker image prune -f
