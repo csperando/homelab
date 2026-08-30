@@ -6,12 +6,14 @@
 # Get RUNNER_TOKEN from the repo: Settings > Actions > Runners > New self-hosted
 # runner (it is shown in the "Configure" section, valid ~1 hour).
 #
-# Run as your normal login user, not root — the script calls sudo only where it
-# needs to. Every step is a no-op if already done, so it is safe to re-run.
+# Run as your normal login user, not root - the script calls sudo only where it
+# needs to (packages, docker group, enabling docker on boot). Every step is a
+# no-op if already done, so it is safe to re-run. Deploy dir defaults to
+# ~/homelab; after the first deploy a copy of this script lives there too.
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/csperando/homelab}"
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/homelab}"
+DEPLOY_DIR="${DEPLOY_DIR:-$HOME/homelab}"
 RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner}"
 RUNNER_VERSION="${RUNNER_VERSION:-2.337.0}"
 RUNNER_SHA256="${RUNNER_SHA256:-}" # optional: verify the runner tarball
@@ -43,8 +45,8 @@ fi
 echo "==> Enabling docker.service (start on boot)"
 sudo systemctl enable --now docker
 
-echo "==> Creating $DEPLOY_DIR owned by $TARGET_USER"
-sudo install -d -o "$TARGET_USER" -g "$TARGET_USER" "$DEPLOY_DIR"
+echo "==> Creating deploy dir $DEPLOY_DIR"
+mkdir -p "$DEPLOY_DIR"
 
 if [ -z "${RUNNER_TOKEN:-}" ]; then
   echo

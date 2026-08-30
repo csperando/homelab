@@ -85,11 +85,13 @@ anything placed there at build time would be shadowed by the mount.
 - `.github/workflows/deploy.yml` — on push to `main` (or `workflow_dispatch`): a
   GitHub-hosted `build-push` job builds the multi-arch image and pushes `:latest` +
   `:sha-<short>` to GHCR, then a `deploy` job **on a self-hosted runner on the dev server**
-  syncs the compose files into `/opt/homelab`, writes `.env` from the `ENV` repo secret,
-  runs `make deploy` pinned to the new `sha-<short>`, and health-checks it. The self-hosted
-  job is gated to `push`/`dispatch` on this repo — never PRs (RCE risk).
+  preflight-checks the host, syncs the compose files into `~/homelab` (the runner user's
+  home — no `sudo`), writes `.env` from the `ENV` repo secret, runs `docker compose pull` +
+  `up -d` pinned to the new `sha-<short>`, and health-checks it. The self-hosted job is
+  gated to `push`/`dispatch` on this repo — never PRs (RCE risk). Host bootstrap (the one
+  `sudo` step + runner install) is `scripts/bootstrap-server.sh`.
 - `.github/workflows/registry-cleanup.yml` — weekly; trims old `sha-*` tags (needs a
-  `GHCR_CLEANUP_TOKEN` PAT secret, inert without it).
+  classic `GHCR_CLEANUP_TOKEN` PAT with `write:packages`+`delete:packages`, inert without it).
 - All action refs are pinned to commit SHAs. Full setup + rollback runbook:
   `docs/deploy.md`; server bootstrap: `scripts/bootstrap-server.sh`.
 

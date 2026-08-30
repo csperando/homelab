@@ -73,15 +73,30 @@ jobs:
       group: deploy-prod
       cancel-in-progress: false
     env:
-      DEPLOY_DIR: /opt/homelab
       HOMELAB_TAG: ${{ needs.build-push.outputs.tag || inputs.tag }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: preflight
+        run: |
+          echo "DEPLOY_DIR=$HOME/homelab" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/homelab" || {
+            echo "::error::cannot create $HOME/homelab - run scripts/bootstrap-server.sh on the server"
+            exit 1
+          }
+          docker info >/dev/null 2>&1 || {
+            echo "::error::docker not usable by the runner user - run scripts/bootstrap-server.sh (adds the user to the docker group) then restart the runner"
+            exit 1
+          }
+          docker compose version >/dev/null 2>&1 || {
+            echo "::error::docker compose v2 not found - run scripts/bootstrap-server.sh"
+            exit 1
+          }
+
       - name: sync compose config to ${{ env.DEPLOY_DIR }}
         run: |
-          mkdir -p "$DEPLOY_DIR"
           rsync -a docker-compose.yml docker-compose.prod.yml Makefile "$DEPLOY_DIR/"
+          rsync -a --delete scripts/ "$DEPLOY_DIR/scripts/"
           rsync -a --delete services/ "$DEPLOY_DIR/services/"
 
       - name: write .env from secret
@@ -94,7 +109,8 @@ jobs:
 
       - name: record currently-running image
         run: |
-          prior=$(docker inspect --format '{{.Config.Image}}' homelab 2>/dev/null || echo '(none)')
+          prior=$(docker inspect --format '{{.Config.Image}}' homelab 2>/dev/null | head -n1 || true)
+          [ -n "$prior" ] || prior=none
           echo "PRIOR_IMAGE=$prior" >> "$GITHUB_ENV"
           echo "Currently running: $prior"
 
@@ -104,7 +120,10 @@ jobs:
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: pull and (re)start the stack
-        run: make -C "$DEPLOY_DIR" deploy
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
 
       - name: verify deployment
         run: |
@@ -118,7 +137,6 @@ jobs:
             fi
             sleep 5
           done
-          prior_tag="${PRIOR_IMAGE##*:}"
           {
             echo "### Deploy"
             echo ""
@@ -131,7 +149,11 @@ jobs:
             echo "| Result | :white_check_mark: healthy |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| Result | :x: not healthy after 120s |" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::homelab did not become healthy. Roll back on the server with: make -C ${DEPLOY_DIR} deploy HOMELAB_TAG=${prior_tag}"
+            if [ "$PRIOR_IMAGE" = none ]; then
+              echo "::error::homelab did not become healthy (no prior image to roll back to). Check: docker logs homelab"
+            else
+              echo "::error::homelab did not become healthy. Roll back on the server: make -C ${DEPLOY_DIR} deploy HOMELAB_TAG=${PRIOR_IMAGE##*:}"
+            fi
             docker logs --tail 50 homelab || true
             exit 1
           fi
