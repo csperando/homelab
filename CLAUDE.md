@@ -57,14 +57,24 @@ anything placed there at build time would be shadowed by the mount.
 
 ### Runtime composition (`docker-compose.yml` + `services/*/compose.yml`)
 
-- All containers share one Docker network, `homelab-net`. Infra services (e.g. Postgres)
-  use `expose:`, never `ports:` — they're reachable only from inside the `homelab`
-  container, by service-name DNS (e.g. `postgres:5432`), never published to the host.
+- All containers share one Docker network, `homelab-net`. Infra services (Postgres, nginx,
+  redis, ollama, ...) use `expose:`, never `ports:` — they're reachable only from inside
+  the `homelab` container, by service-name DNS (e.g. `postgres:5432`), never published to
+  the host. **Exception:** `wireguard` (see below) publishes one UDP port and takes
+  `cap_add`/`sysctls`/`devices` — a WireGuard endpoint has to be reachable from the
+  internet.
 - Infra services are wired in via the root compose file's `include:` list, each living in
   its own `services/<name>/compose.yml`. Adding one is: create that file following
   `services/postgres/compose.yml` as a template (attach `homelab-net`, use `expose:`,
   bind-mount persistent state under `./volume/infra/<name>`), then add one `include:` line
   to the root file. No other service definitions need to change.
+- **`vpn` profile** — `wireguard` (wg-easy v14) and `cloudflared` carry
+  `profiles: ["vpn"]`, so `docker compose up` in local dev never starts them; the server
+  opts in with `COMPOSE_PROFILES=vpn` in its `.env`. `wireguard` is the internet-facing
+  WireGuard endpoint (full tunnel; `WG_POST_UP` drops forwarded `wg0` traffic to all
+  RFC1918 so a client is a bare internet exit). `cloudflared` runs a Cloudflare Tunnel
+  (dials out, no port) that serves the wg-easy admin UI behind Cloudflare Access. CI
+  validates both with `docker compose --profile vpn config`. Full runbook: `docs/vpn.md`.
 - Persistent state lives under `./volume` (gitignored via `/volume/*` in `.gitignore`),
   bind-mounted into the container at three points:
   - `${WORKSPACE:-./volume}` → `/root/workspace` — cloned repos / dev work. Overridable via
@@ -155,3 +165,6 @@ under `.claude/tmp/` (gitignored):
 - `5173` — frontend dev server (e.g. Vite/Vue)
 - `3000` — API dev server
 - `55123` — health/dashboard API
+- `51820/udp` — WireGuard endpoint (`wireguard`, `vpn` profile; `WG_UDP_PORT`, the one
+  host-published infra port). wg-easy's UI port stays `expose:`-only, reached via the
+  `cloudflared` tunnel.

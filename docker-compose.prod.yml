@@ -19,3 +19,7 @@ services:
     restart: unless-stopped
   ollama:
     restart: unless-stopped
+  wireguard:
+    restart: unless-stopped
+  cloudflared:
+    restart: unless-stopped

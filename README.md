@@ -87,6 +87,10 @@ single shared instance — each project should create/use its own database or sc
 rather than assuming exclusive use of `postgres`. Data lives in `./volume/infra/postgres`
 and persists independently of the Homelab container (survives `make stop`/`make clean`).
 
+Other infra services on the network: **nginx**, **redis**, **ollama**, and — server-only,
+behind the `vpn` compose profile — **wireguard** (wg-easy) + **cloudflared** for a
+WireGuard VPN. See [`docs/vpn.md`](docs/vpn.md).
+
 **Adding a service**
 
 1. Create `services/<name>/compose.yml`, following `services/postgres/compose.yml` as a
