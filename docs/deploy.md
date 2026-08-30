@@ -33,8 +33,10 @@ their own (`restart: unless-stopped` + enabled services).
 - Debian/Ubuntu host (the bootstrap script uses `apt`).
 - Docker Engine, and **Docker Compose v2.24+** (`docker compose version`) — the prod
   override uses the `!reset` tag.
-- Outbound HTTPS to `github.com` and `ghcr.io`. **No inbound ports** — the runner dials
-  out.
+- Outbound HTTPS to `github.com` and `ghcr.io`; the runner and the `cloudflared` tunnel
+  both dial out. The **only inbound port** is the WireGuard UDP endpoint
+  (`WG_UDP_PORT`, default 51820), forwarded on the router — see [`vpn.md`](vpn.md). The
+  wg-easy admin UI has no inbound port (it is served through the tunnel).
 
 ---
 
@@ -98,7 +100,7 @@ sudo ~/actions-runner/svc.sh uninstall       # remove the service (then "Remove"
 
 | Item | What | Notes |
 |---|---|---|
-| **`ENV`** secret | full contents of `.env` (Postgres creds + `DOCKER_SOCK_PATH`) | written to `~/homelab/.env` (mode 600) **every deploy** — edit the secret, not the file on the box |
+| **`ENV`** secret | full contents of `.env` — Postgres creds, `DOCKER_SOCK_PATH`, and (for the VPN) `COMPOSE_PROFILES=vpn`, `WG_HOST`, `WG_UDP_PORT`, `WG_UI_PORT`, `WG_DEFAULT_DNS`, `WG_ALLOWED_IPS`, `PASSWORD_HASH`, `TUNNEL_TOKEN` | written to `~/homelab/.env` (mode 600) **every deploy** — edit the secret, not the file on the box. Without `COMPOSE_PROFILES=vpn` the deploy's `up -d --remove-orphans` treats `wireguard`/`cloudflared` as orphans and removes them. Real VPN values (hostname, token, hash) live only here — never in a tracked file. Full runbook: [`vpn.md`](vpn.md) |
 | **`GHCR_CLEANUP_TOKEN`** secret *(optional)* | a **classic** PAT with `write:packages` + `delete:packages` | for `registry-cleanup.yml` only; fine-grained PATs have no packages write/delete permission. Inert (logs a warning) until set. Test: Actions → registry-cleanup → Run workflow → `dry-run = true` |
 | Package visibility | private (inherited from the private repo) | confirm at `github.com/users/csperando/packages/container/homelab/settings` |
 | Branch protection | **not enabled** — direct pushes to `main` are allowed | to require PRs later: Settings → Branches → require a PR (0 reviewers) + require the `test` check |
@@ -114,9 +116,14 @@ shows the deployed tag, the previous tag, and the health result.
 
 ```sh
 cd ~/homelab
-docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps   # includes wireguard + cloudflared
 curl -fsS localhost:55123/healthz
+docker logs --tail 20 cloudflared    # tunnel connection state (distroless — no healthcheck)
+docker exec wireguard wg show        # WireGuard peers / handshakes
 ```
+
+The deploy health check only gates the `homelab` container, so a broken `wireguard` or
+`cloudflared` will **not** fail a deploy — verify them here after a VPN-related change.
 
 ---
 

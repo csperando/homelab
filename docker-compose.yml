@@ -7,6 +7,8 @@ include:
   - services/nginx/compose.yml
   - services/redis/compose.yml
   - services/ollama/compose.yml
+  - services/wireguard/compose.yml
+  - services/cloudflared/compose.yml
 
 services:
   homelab:

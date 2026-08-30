@@ -1,0 +1,19 @@
+# Cloudflare Tunnel for the wg-easy admin UI. Server-only: gated behind the `vpn`
+# compose profile (the server sets COMPOSE_PROFILES=vpn). See docs/vpn.md.
+#
+# Dials out to Cloudflare — no inbound port, consistent with the rest of the deploy.
+# Cloudflare Access enforces identity at the edge before traffic reaches wg-easy;
+# the public hostname -> `http://wireguard:<WG_UI_PORT>` route is configured in the
+# Cloudflare dashboard, not here. Token-only: no cert/credentials/config files.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.2
+    profiles: ["vpn"]
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks: [homelab-net]
+    # No healthcheck: the image is distroless (no shell, no curl/wget). Tunnel
+    # health is visible in the Cloudflare dashboard; `--metrics` exposes /ready on
+    # :2000 for optional external monitoring. `restart: unless-stopped` (prod
+    # override) covers a crash-looping bad token.
