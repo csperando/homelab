@@ -68,13 +68,17 @@ anything placed there at build time would be shadowed by the mount.
   `services/postgres/compose.yml` as a template (attach `homelab-net`, use `expose:`,
   bind-mount persistent state under `./volume/infra/<name>`), then add one `include:` line
   to the root file. No other service definitions need to change.
-- **`vpn` profile** — `wireguard` (wg-easy v14) and `cloudflared` carry
+- **`vpn` profile** — `wireguard` (wg-easy v14), `wg-ddns`, and `cloudflared` carry
   `profiles: ["vpn"]`, so `docker compose up` in local dev never starts them; the server
   opts in with `COMPOSE_PROFILES=vpn` in its `.env`. `wireguard` is the internet-facing
-  WireGuard endpoint (full tunnel; `WG_POST_UP` drops forwarded `wg0` traffic to all
-  RFC1918 so a client is a bare internet exit). `cloudflared` runs a Cloudflare Tunnel
-  (dials out, no port) that serves the wg-easy admin UI behind Cloudflare Access. CI
-  validates both with `docker compose --profile vpn config`. Full runbook: `docs/vpn.md`.
+  WireGuard endpoint (full tunnel, IPv4 only; `WG_POST_UP` drops forwarded `wg0` traffic
+  to all RFC1918 so a client is a bare internet exit). `wg-ddns` (defined in the same
+  `services/wireguard/compose.yml`) is a tiny alpine loop running
+  `services/wireguard/cloudflare-ddns.sh` to keep `WG_HOST`'s A record — a DNS-only,
+  unproxied record, separate from the UI hostname — pointed at the changing home public
+  IP. `cloudflared` runs a Cloudflare Tunnel (dials out, no port) that serves the wg-easy
+  admin UI behind Cloudflare Access. CI validates all three with
+  `docker compose --profile vpn config`. Full runbook: `docs/vpn.md`.
 - Persistent state lives under `./volume` (gitignored via `/volume/*` in `.gitignore`),
   bind-mounted into the container at three points:
   - `${WORKSPACE:-./volume}` → `/root/workspace` — cloned repos / dev work. Overridable via

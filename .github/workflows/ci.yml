@@ -24,10 +24,10 @@ jobs:
       - name: validate compose config
         run: |
           cp .env.sample .env
-          # default profile: the vpn services (wireguard, cloudflared) must stay out
+          # default profile: the vpn services (wireguard, wg-ddns, cloudflared) must stay out
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
-          if docker compose config --services | grep -qxE 'wireguard|cloudflared'; then
-            echo "::error::wireguard/cloudflared must be gated behind the vpn profile"
+          if docker compose config --services | grep -qxE 'wireguard|wg-ddns|cloudflared'; then
+            echo "::error::wireguard/wg-ddns/cloudflared must be gated behind the vpn profile"
             exit 1
           fi
           # --profile vpn: schema-check the vpn services too

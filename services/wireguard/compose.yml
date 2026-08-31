@@ -6,10 +6,16 @@
 # endpoint is the whole point) and needs NET_ADMIN + ip_forward. The web UI stays on
 # `expose:` only and is reached through the cloudflared tunnel, never a host port.
 #
-# Client model: full tunnel (WG_ALLOWED_IPS 0.0.0.0/0, ::/0). The WG_POST_UP rules
-# below drop forwarded traffic from wg0 to every RFC1918 range, so a client is a bare
-# internet exit with no route to the container network or the home LAN, and cannot
+# Client model: full tunnel (WG_ALLOWED_IPS 0.0.0.0/0 — IPv4 only; the container has no
+# IPv6 egress, so advertising ::/0 would black-hole clients' v6 traffic). The WG_POST_UP
+# rules below drop forwarded traffic from wg0 to every RFC1918 range, so a client is a
+# bare internet exit with no route to the container network or the home LAN, and cannot
 # reach the admin UI over the tunnel.
+#
+# WG_HOST must be a DNS-only (unproxied) record pointing at the home public IP — the
+# WireGuard handshake is UDP and Cloudflare's proxy only carries HTTP(S). It is a
+# *separate* record from the proxied admin-UI hostname the cloudflared tunnel owns. The
+# wg-ddns companion service keeps that record's A value in sync with the public IP.
 services:
   wireguard:
     image: ghcr.io/wg-easy/wg-easy:14
@@ -20,7 +26,7 @@ services:
       WG_PORT: ${WG_UDP_PORT:-51820}
       PORT: ${WG_UI_PORT:-51821}
       WG_DEFAULT_DNS: ${WG_DEFAULT_DNS:-1.1.1.1}
-      WG_ALLOWED_IPS: ${WG_ALLOWED_IPS:-0.0.0.0/0, ::/0}
+      WG_ALLOWED_IPS: ${WG_ALLOWED_IPS:-0.0.0.0/0}
       WG_POST_UP: >-
         iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE;
         iptables -A INPUT -p udp -m udp --dport 51820 -j ACCEPT;
@@ -60,3 +66,34 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Dynamic DNS for WG_HOST: the WireGuard endpoint record must track the home public
+  # IP (which changes) and stay unproxied. Bundled with wireguard rather than split into
+  # its own services/<name>/ dir — it exists only to serve this endpoint.
+  #
+  # The loop is cheap: each tick is one HTTPS GET to an IP-echo service. Cloudflare's API
+  # is called only when the detected IP differs from ./volume/infra/wg-ddns/last-ip, or
+  # every DDNS_RECONCILE_SECONDS (default 6h) as a drift check — so a tight DDNS_INTERVAL
+  # keeps changeover fast without hammering Cloudflare.
+  wg-ddns:
+    image: alpine:3.21
+    profiles: ["vpn"]
+    depends_on: [wireguard]
+    environment:
+      CLOUDFLARE_TOKEN: ${CLOUDFLARE_TOKEN}
+      CF_RECORD_NAME: ${WG_HOST}            # single source of truth — always tracks WG_HOST
+      CF_ZONE_NAME: ${CF_ZONE_NAME:-}       # optional; script derives it from CF_RECORD_NAME
+      DDNS_INTERVAL: ${DDNS_INTERVAL:-60}
+      DDNS_RECONCILE_SECONDS: ${DDNS_RECONCILE_SECONDS:-21600}
+    volumes:
+      - ./cloudflare-ddns.sh:/usr/local/bin/cloudflare-ddns.sh:ro
+      - ../../volume/infra/wg-ddns:/state
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache bash curl jq >/dev/null
+        while true; do
+          bash /usr/local/bin/cloudflare-ddns.sh || echo "ddns: check failed"
+          sleep "$${DDNS_INTERVAL:-60}"
+        done
+    networks: [homelab-net]
