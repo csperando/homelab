@@ -179,21 +179,26 @@ below.
   with `tcpdump -ni any udp port <WG_UDP_PORT>` on the server showing **zero** packets
   while a client connects, cross-checked with a UDP probe sent from a host outside the
   home network/ISP entirely (not just a client retry — phone/carrier or ISP-side
-  blocking can look identical from the client side alone). So far, the *only* thing
-  that has restored it is toggling Default DMZ Server on and off (targeting the
-  server's LAN IP) — the plain port-forward rule alone has not recovered on its own,
-  and DMZ has needed toggling more than once in a row before it took effect. This
-  points at the router's single-port UDP-forward code path specifically being broken,
-  since DMZ (a different forwarding path in the firmware) is what actually works.
-  **Keep DMZ off by default** — it exposes every port on the server, not just the VPN
-  one — and only enable it briefly to test/recover. Not yet tried: whether toggling
-  *just* the port-forward rule itself (off/on, or delete-and-recreate) is enough on its
-  own, which would be a narrower fix than opening DMZ; try that first next time before
-  reaching for DMZ. Also unconfirmed: whether a RAX10 firmware update fixes this, and
-  whether it's specific to the server being a Wi-Fi (`wlp1s0`) client rather than wired
-  (moving to wired isn't an option here — the server's physical location can't reach the
-  router by cable). The [watchdog workflow](#external-reachability-watchdog-github-actions)
-  above checks this automatically every 15 minutes and fails loudly when it recurs.
+  blocking can look identical from the client side alone). DMZ toggling (targeting the
+  server's LAN IP) restored it when tried, but that's not a sustainable fix — it
+  exposes every port on the server, not just the VPN one, and shouldn't be a standing
+  config.
+  **Confirmed fix: a UPnP-requested mapping works where the static rule doesn't.**
+  UPnP was already enabled on the router (portmap table was just empty — nothing had
+  ever requested one) and a manual `AddPortMapping` request for `UDP <WG_UDP_PORT>` was
+  accepted, took effect immediately, and connected a client right away — no DMZ, no
+  admin-panel login at all. This points at the bug being specific to the RAX10's
+  *static* forward-rule persistence, since UPnP exercises a different code path in the
+  same router and worked immediately where the static rule had gone dead. `0` (request
+  unlimited lease) was accepted, so no renewal timer has been needed so far.
+  Re-request it with `scripts/refresh-vpn-portmap.sh` (`INTERNAL_HOST=<server LAN IP>
+  ./scripts/refresh-vpn-portmap.sh`) any time this recurs. Unconfirmed: whether a RAX10
+  firmware update fixes the static-rule bug directly, and whether it's related to the
+  server being a Wi-Fi (`wlp1s0`) client rather than wired (moving to wired isn't an
+  option here — the server's physical location can't reach the router by cable). The
+  [watchdog workflow](#external-reachability-watchdog-github-actions) above checks
+  reachability automatically every 15 minutes and fails loudly when it recurs —
+  including if the UPnP mapping itself ever lapses or stops working.
 - **`WG_PERSISTENT_KEEPALIVE`.** Not set (wg-easy default 0). Setting it to `25` in the
   `ENV` secret would keep sleeping phones' NAT mappings warm and make a dead tunnel
   recover faster after an IP change. Regenerate clients after changing it.
