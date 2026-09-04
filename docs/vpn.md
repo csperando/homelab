@@ -141,15 +141,59 @@ hostname in their `Endpoint`, so an IP change is transparent once the record upd
 
 ---
 
+## External reachability watchdog (GitHub Actions)
+
+`.github/workflows/vpn-watchdog.yml` runs every 15 minutes from a GitHub-hosted
+runner — outside the home network entirely — and attempts a real WireGuard handshake
+against the endpoint. That's deliberate: a blind UDP packet send can't tell "reachable"
+from "black-holed" for this protocol, since WireGuard silently drops anything that isn't
+a valid handshake init either way; only an actual handshake attempt proves the tunnel
+works. A failed run relies on GitHub's own workflow-failure notification (email /
+notification bell) — no extra webhook or service. Stays inert (skips with a warning)
+until its secrets exist.
+
+**One-time setup:**
+
+1. In wg-easy (`https://<UI_HOSTNAME>`), create a new client named `gh-watchdog` and
+   download its `.conf`.
+2. Store the file's contents verbatim as a single repo secret, set from your own
+   machine (never paste key material anywhere else — it's a real credential):
+   ```
+   gh secret set WATCHDOG_WG_CONF < path/to/gh-watchdog.conf
+   ```
+   The workflow writes it straight to disk and runs `wg-quick up` on it as-is — no
+   parsing, so there's no risk of a value getting mismatched or mistyped. It doesn't
+   need `PersistentKeepalive`; the workflow triggers the handshake itself with a ping
+   through the tunnel and checks `wg show ... latest-handshakes` for proof, not the
+   ping's exit code (ICMP can be filtered independently of tunnel health).
+
+A failed run means the endpoint isn't reachable from outside — see "Troubleshooting"
+below.
+
+---
+
 ## Known issues / follow-ups
 
-- **RAX10 port-forward activation.** The UDP `WG_UDP_PORT` forward did not take effect
-  after a plain router reboot — it only started passing packets after toggling the
-  Default DMZ Server on and off (which forces a NAT-table reload). It may need that again
-  after a firmware update or power loss. The server is on Wi-Fi (`wlp1s0`); if this
-  recurs, try a wired connection (some Nighthawk firmware only forwards to wired clients)
-  or script a DMZ toggle. Symptom: `tcpdump -ni any udp port <WG_UDP_PORT>` on the server
-  shows nothing while a client connects, but a DMZ to the server works.
+- **RAX10 port-forward activation.** The plain `UDP <WG_UDP_PORT>` forward rule has
+  repeatedly stopped passing packets with no config change on either end — confirmed
+  with `tcpdump -ni any udp port <WG_UDP_PORT>` on the server showing **zero** packets
+  while a client connects, cross-checked with a UDP probe sent from a host outside the
+  home network/ISP entirely (not just a client retry — phone/carrier or ISP-side
+  blocking can look identical from the client side alone). So far, the *only* thing
+  that has restored it is toggling Default DMZ Server on and off (targeting the
+  server's LAN IP) — the plain port-forward rule alone has not recovered on its own,
+  and DMZ has needed toggling more than once in a row before it took effect. This
+  points at the router's single-port UDP-forward code path specifically being broken,
+  since DMZ (a different forwarding path in the firmware) is what actually works.
+  **Keep DMZ off by default** — it exposes every port on the server, not just the VPN
+  one — and only enable it briefly to test/recover. Not yet tried: whether toggling
+  *just* the port-forward rule itself (off/on, or delete-and-recreate) is enough on its
+  own, which would be a narrower fix than opening DMZ; try that first next time before
+  reaching for DMZ. Also unconfirmed: whether a RAX10 firmware update fixes this, and
+  whether it's specific to the server being a Wi-Fi (`wlp1s0`) client rather than wired
+  (moving to wired isn't an option here — the server's physical location can't reach the
+  router by cable). The [watchdog workflow](#external-reachability-watchdog-github-actions)
+  above checks this automatically every 15 minutes and fails loudly when it recurs.
 - **`WG_PERSISTENT_KEEPALIVE`.** Not set (wg-easy default 0). Setting it to `25` in the
   `ENV` secret would keep sleeping phones' NAT mappings warm and make a dead tunnel
   recover faster after an IP change. Regenerate clients after changing it.
