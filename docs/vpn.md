@@ -21,7 +21,10 @@ activates them with `COMPOSE_PROFILES=vpn` in its `.env` (via the `ENV` secret).
   traffic egresses through the server. `WG_POST_UP` in `services/wireguard/compose.yml`
   drops forwarded `wg0` traffic to every RFC1918 range and blocks the UI port on `wg0`, so
   a client (or a stolen client key) is a bare internet exit — no route to the container
-  network, the home LAN, or the admin UI.
+  network, the home LAN, or the admin UI. **This means the homelab dashboard and every
+  other LAN device are unreachable over the VPN by default** — that's intentional, not a
+  bug. Optionally set `WG_LAN_ALLOW_HOST` (see below) to punch a single-host exception
+  through this block.
 
 > Keep real hostnames, public IPs, LAN CIDRs, the tunnel token, the API token, and the
 > password hash out of every tracked file. They live only in the `ENV` secret / the
@@ -169,6 +172,38 @@ until its secrets exist.
 
 A failed run means the endpoint isn't reachable from outside — see "Troubleshooting"
 below.
+
+---
+
+## LAN access for the dashboard (`WG_LAN_ALLOW_HOST`)
+
+By default a connected client has **no route to the home LAN at all** — see "Full tunnel"
+above. That means the homelab health dashboard (`<server LAN IP>:8080`, nginx's
+host-published port proxying to the `homelab` container's `55123`) is unreachable over
+the VPN out of the box, which is intentional (a stolen client key shouldn't get LAN
+access).
+
+To allow it anyway, set one env var to the server's own LAN IP:
+
+```sh
+# .env on the server (never commit the real IP)
+WG_LAN_ALLOW_HOST=<server LAN IP>
+```
+
+then restart the `wireguard` service so `WG_POST_UP` re-runs with the new rule:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d wireguard
+```
+
+This adds a single `FORWARD -d <that IP> -j ACCEPT` rule *before* the RFC1918 `DROP`
+rules, so exactly that one host becomes reachable over the tunnel — every other LAN
+device (the router, other machines) stays blocked. Leaving it unset keeps prior
+behavior exactly (the rule falls back to an inert placeholder IP that nothing routes to).
+
+This only opens the specific host; it doesn't open specific *ports* beyond what's already
+listening there. Both nginx's `8080` and the underlying `55123` are host-published on the
+server, so once the host is reachable over the tunnel, both ports are too.
 
 ---
 

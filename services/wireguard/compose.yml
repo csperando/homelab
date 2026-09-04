@@ -12,6 +12,13 @@
 # bare internet exit with no route to the container network or the home LAN, and cannot
 # reach the admin UI over the tunnel.
 #
+# WG_LAN_ALLOW_HOST (optional, set in .env — never committed) punches one narrow hole in
+# that block: traffic to exactly that IP (e.g. the homelab server itself, to reach the
+# dashboard over the tunnel) is accepted before the RFC1918 DROPs are evaluated. Every
+# other LAN host stays unreachable. Leave unset to keep the VPN a pure internet-exit
+# tunnel with zero LAN access; the default (255.255.255.255) is an inert placeholder that
+# nothing ever routes to, so the rule is a no-op when unset.
+#
 # WG_HOST must be a DNS-only (unproxied) record pointing at the home public IP — the
 # WireGuard handshake is UDP and Cloudflare's proxy only carries HTTP(S). It is a
 # *separate* record from the proxied admin-UI hostname the cloudflared tunnel owns. The
@@ -31,6 +38,7 @@ services:
         iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE;
         iptables -A INPUT -p udp -m udp --dport 51820 -j ACCEPT;
         iptables -A INPUT -i wg0 -p tcp --dport ${WG_UI_PORT:-51821} -j DROP;
+        iptables -A FORWARD -i wg0 -d ${WG_LAN_ALLOW_HOST:-255.255.255.255} -j ACCEPT;
         iptables -A FORWARD -i wg0 -d 10.0.0.0/8 -j DROP;
         iptables -A FORWARD -i wg0 -d 172.16.0.0/12 -j DROP;
         iptables -A FORWARD -i wg0 -d 192.168.0.0/16 -j DROP;
@@ -40,6 +48,7 @@ services:
         iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE;
         iptables -D INPUT -p udp -m udp --dport 51820 -j ACCEPT;
         iptables -D INPUT -i wg0 -p tcp --dport ${WG_UI_PORT:-51821} -j DROP;
+        iptables -D FORWARD -i wg0 -d ${WG_LAN_ALLOW_HOST:-255.255.255.255} -j ACCEPT;
         iptables -D FORWARD -i wg0 -d 10.0.0.0/8 -j DROP;
         iptables -D FORWARD -i wg0 -d 172.16.0.0/12 -j DROP;
         iptables -D FORWARD -i wg0 -d 192.168.0.0/16 -j DROP;
