@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -118,10 +119,13 @@ func coverageOnly(h http.Handler) http.Handler {
 }
 
 func main() {
+	adminUser := os.Getenv("ADMIN_USER")
+	adminPass := os.Getenv("ADMIN_PASSWORD")
+
 	http.HandleFunc("/healthz", handleHealthz)
-	http.HandleFunc("/api/status", handleAPIStatus)
-	http.HandleFunc("/", handleDashboard)
-	http.Handle("/files/", http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir)))))
+	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
+	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
+	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
 
 	addr := ":55123"
 	log.Printf("homelab-healthcheck listening on %s", addr)
