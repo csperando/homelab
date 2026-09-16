@@ -198,3 +198,35 @@ func TestHandleDashboard(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleRepos(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
+	handleRepos(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"<html", "repos", "coming soon"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("repos body missing %q", want)
+		}
+	}
+}
+
+func TestHandleAgents(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	handleAgents(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"<html", "agents", "coming soon"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agents body missing %q", want)
+		}
+	}
+}

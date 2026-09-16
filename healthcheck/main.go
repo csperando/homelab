@@ -14,12 +14,13 @@ import (
 	"time"
 )
 
-//go:embed templates/dashboard.html
+//go:embed templates/*.html
 var templatesFS embed.FS
 
-var dashboardTmpl = template.Must(template.ParseFS(templatesFS, "templates/dashboard.html"))
+var pageTmpl = template.Must(template.ParseFS(templatesFS, "templates/*.html"))
 
 type dashboardView struct {
+	Active       string
 	Status       string
 	Uptime       string
 	Timestamp    string
@@ -31,6 +32,12 @@ type dashboardView struct {
 	LoadAvg      string
 	Repos        []repoStatus
 	Docker       dockerStatus
+}
+
+// pageView is the minimal template data for placeholder pages that don't yet
+// have any content of their own beyond the shared head/nav.
+type pageView struct {
+	Active string
 }
 
 // shortID truncates an id for compact table display, e.g. a UUID
@@ -61,6 +68,7 @@ func formatKB(kb uint64) string {
 
 func toView(s statusData) dashboardView {
 	return dashboardView{
+		Active:       "dashboard",
 		Status:       s.Status,
 		Uptime:       time.Since(startTime).Round(time.Second).String(),
 		Timestamp:    s.Timestamp.Format(time.RFC3339),
@@ -95,8 +103,22 @@ func handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	view := toView(gatherStatus())
-	if err := dashboardTmpl.Execute(w, view); err != nil {
+	if err := pageTmpl.ExecuteTemplate(w, "dashboard.html", view); err != nil {
 		log.Printf("failed to render dashboard: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+func handleRepos(w http.ResponseWriter, r *http.Request) {
+	if err := pageTmpl.ExecuteTemplate(w, "repos.html", pageView{Active: "repos"}); err != nil {
+		log.Printf("failed to render repos page: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+func handleAgents(w http.ResponseWriter, r *http.Request) {
+	if err := pageTmpl.ExecuteTemplate(w, "agents.html", pageView{Active: "agents"}); err != nil {
+		log.Printf("failed to render agents page: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
@@ -125,6 +147,8 @@ func main() {
 	http.HandleFunc("/healthz", handleHealthz)
 	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
 	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
+	http.Handle("/repos", withAuth(adminUser, adminPass, http.HandlerFunc(handleRepos)))
+	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
 	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
 
 	addr := ":55123"

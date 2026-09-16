@@ -1,114 +1,101 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head" .}}
   <meta http-equiv="refresh" content="10">
-  <title>homelab dev container</title>
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            hl: {
-              bg: '#111111',
-              text: '#dddddd',
-              accent: '#99ccff',
-              ok: '#66ff66',
-              warn: '#ffcc66',
-              muted: '#888888',
-              border: '#333333',
-            },
-          },
-        },
-      },
-    };
-  </script>
 </head>
-<body class="font-mono bg-hl-bg text-hl-text m-8">
-  <h1 class="text-lg text-white font-semibold">homelab dev container <span class="text-hl-ok"><span class="motion-safe:animate-pulse motion-reduce:animate-none">&#9679;</span> {{.Status}}</span></h1>
-  <p class="text-hl-muted">uptime {{.Uptime}} &middot; as of {{.Timestamp}}</p>
+<body class="font-mono bg-hl-bg text-hl-text">
+  <div class="max-w-3xl mx-auto p-8">
+    <h1 class="text-lg text-white font-semibold">homelab dev container <span class="text-hl-ok"><span class="motion-safe:animate-pulse motion-reduce:animate-none">&#9679;</span> {{.Status}}</span></h1>
+    <p class="text-hl-muted">uptime {{.Uptime}} &middot; as of {{.Timestamp}}</p>
 
-  <div class="mt-8">
-    <h2 class="text-sky-300 text-sm font-semibold">tools</h2>
-    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1 max-w-2xl">
-      {{range $name, $version := .ToolVersions}}
-      <div class="flex justify-between gap-4 border-b border-hl-border py-1">
-        <span>{{$name}}</span><span class="text-hl-muted">{{$version}}</span>
-      </div>
-      {{end}}
-    </div>
-  </div>
+    {{template "nav" .}}
 
-  <div class="mt-8">
-    <h2 class="text-sky-300 text-sm font-semibold">resources</h2>
-    <div class="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-1 max-w-2xl">
-      <div class="flex justify-between gap-4 border-b border-hl-border py-1">
-        <span>workspace disk</span><span class="text-hl-muted">{{.DiskUsed}} / {{.DiskTotal}}</span>
-      </div>
-      <div class="flex justify-between gap-4 border-b border-hl-border py-1">
-        <span>memory available</span><span class="text-hl-muted">{{.MemAvail}} / {{.MemTotal}}</span>
-      </div>
-      <div class="flex justify-between gap-4 border-b border-hl-border py-1">
-        <span>load average (1/5/15m)</span><span class="text-hl-muted">{{.LoadAvg}}</span>
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">tools</h2>
+      <div class="mt-2 grid grid-cols-1 gap-y-1">
+        {{range $name, $version := .ToolVersions}}
+        <div class="flex justify-between gap-4 border-b border-hl-border py-1">
+          <span>{{$name}}</span><span class="text-hl-muted text-right">{{$version}}</span>
+        </div>
+        {{end}}
       </div>
     </div>
-  </div>
 
-  <div class="mt-8">
-    <h2 class="text-sky-300 text-sm font-semibold">workspace repos</h2>
-    <div class="mt-2 max-w-3xl">
-      {{if .Repos}}
-      <div class="hidden sm:grid sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto_minmax(0,2fr)] gap-x-6 gap-y-1 text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">
-        <span>repo</span><span>branch</span><span>status</span><span>coverage</span>
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">resources</h2>
+      <div class="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-1">
+        <div class="flex justify-between gap-4 border-b border-hl-border py-1">
+          <span>workspace disk</span><span class="text-hl-muted">{{.DiskUsed}} / {{.DiskTotal}}</span>
+        </div>
+        <div class="flex justify-between gap-4 border-b border-hl-border py-1">
+          <span>memory available</span><span class="text-hl-muted">{{.MemAvail}} / {{.MemTotal}}</span>
+        </div>
+        <div class="flex justify-between gap-4 border-b border-hl-border py-1">
+          <span>load average (1/5/15m)</span><span class="text-hl-muted">{{.LoadAvg}}</span>
+        </div>
       </div>
-      {{range .Repos}}
-      <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto_minmax(0,2fr)] gap-x-6 gap-y-0.5 sm:gap-y-1 border-b border-hl-border py-2 sm:py-1">
-        <span class="min-w-0 truncate" title="{{.Path}}"><span class="sm:hidden text-hl-muted">repo: </span>{{.Path}}</span>
-        <span class="min-w-0 truncate" title="{{.Branch}}"><span class="sm:hidden text-hl-muted">branch: </span>{{.Branch}}</span>
-        <span>{{if .Dirty}}<span class="text-hl-warn" title="uncommitted changes present (git status --porcelain is non-empty)">dirty</span>{{else}}<span class="text-hl-ok" title="no uncommitted changes (git status --porcelain is empty)">clean</span>{{end}}</span>
-        <span class="min-w-0">
-          {{if .Coverage}}
-            {{$multi := gt (len .Coverage) 1}}
-            {{range .Coverage}}
-              <span class="block truncate">{{if $multi}}{{.Path}}: {{end}}{{if lt .Percent 0.0}}{{if .ReportURL}}<a class="text-hl-muted underline" href="{{.ReportURL}}" target="_blank" rel="noopener">report (no summary)</a>{{else}}<span class="text-hl-muted">found (no summary)</span>{{end}}{{else}}{{if .ReportURL}}<a class="underline" href="{{.ReportURL}}" target="_blank" rel="noopener">{{printf "%.1f%%" .Percent}}</a>{{else}}{{printf "%.1f%%" .Percent}}{{end}}{{end}}</span>
+    </div>
+
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">workspace repos</h2>
+      <div class="mt-2">
+        {{if .Repos}}
+        <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto_minmax(0,2fr)] gap-x-6 gap-y-1">
+          <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">repo</span>
+          <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">branch</span>
+          <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">status</span>
+          <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">coverage</span>
+          {{range .Repos}}
+          <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Path}}"><span class="sm:hidden text-hl-muted">repo: </span>{{.Path}}</span>
+          <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Branch}}"><span class="sm:hidden text-hl-muted">branch: </span>{{.Branch}}</span>
+          <span class="pt-2 sm:pt-1">{{if .Dirty}}<span class="text-hl-warn" title="uncommitted changes present (git status --porcelain is non-empty)">dirty</span>{{else}}<span class="text-hl-ok" title="no uncommitted changes (git status --porcelain is empty)">clean</span>{{end}}</span>
+          <span class="min-w-0 pt-2 sm:pt-1">
+            {{if .Coverage}}
+              {{$multi := gt (len .Coverage) 1}}
+              {{range .Coverage}}
+                <span class="block truncate">{{if $multi}}{{.Path}}: {{end}}{{if lt .Percent 0.0}}{{if .ReportURL}}<a class="text-hl-muted underline" href="{{.ReportURL}}" target="_blank" rel="noopener">report (no summary)</a>{{else}}<span class="text-hl-muted">found (no summary)</span>{{end}}{{else}}{{if .ReportURL}}<a class="underline" href="{{.ReportURL}}" target="_blank" rel="noopener">{{printf "%.1f%%" .Percent}}</a>{{else}}{{printf "%.1f%%" .Percent}}{{end}}{{end}}</span>
+              {{end}}
+            {{else}}
+              <span class="text-hl-muted">&mdash;</span>
             {{end}}
-          {{else}}
-            <span class="text-hl-muted">&mdash;</span>
+          </span>
+          <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
           {{end}}
-        </span>
-      </div>
-      {{end}}
-      {{else}}
-      <p class="text-hl-muted">no repos cloned yet</p>
-      {{end}}
-    </div>
-  </div>
-
-  <div class="mt-8">
-    <h2 class="text-sky-300 text-sm font-semibold">infra services</h2>
-    <div class="mt-2 max-w-3xl">
-      {{if .Docker.Enabled}}
-        {{if .Docker.Services}}
-        <div class="hidden sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto_minmax(0,1fr)_auto] gap-x-6 gap-y-1 text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">
-          <span>service</span><span>image</span><span>status</span><span>port</span><span>uptime</span>
         </div>
-        {{range .Docker.Services}}
-        <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto_minmax(0,1fr)_auto] gap-x-6 gap-y-0.5 sm:gap-y-1 border-b border-hl-border py-2 sm:py-1">
-          <span class="min-w-0 truncate" title="{{.Name}}"><span class="sm:hidden text-hl-muted">service: </span>{{.Name}}</span>
-          <span class="min-w-0 truncate" title="{{.Image}}"><span class="sm:hidden text-hl-muted">image: </span>{{.Image}}</span>
-          <span>{{if eq .Health "healthy"}}<span class="text-hl-ok">{{.State}} (healthy)</span>{{else if eq .Health "unhealthy"}}<span class="text-hl-warn">{{.State}} (unhealthy)</span>{{else}}{{.State}}{{end}}</span>
-          <span class="min-w-0 truncate">{{if .Ports}}{{range $i, $p := .Ports}}{{if $i}}, {{end}}{{$p}}{{end}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
-          <span>{{.Uptime}}</span>
-        </div>
-        {{end}}
         {{else}}
-        <p class="text-hl-muted">no infra services found on homelab-net</p>
+        <p class="text-hl-muted">no repos cloned yet</p>
         {{end}}
-      {{else}}
-      <p class="text-hl-muted" title="opt in via DOCKER_SOCK_PATH in .env">{{.Docker.Reason}}</p>
-      {{end}}
+      </div>
+    </div>
+
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">infra services</h2>
+      <div class="mt-2">
+        {{if .Docker.Enabled}}
+          {{if .Docker.Services}}
+          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto_minmax(0,1fr)_auto] gap-x-6 gap-y-1">
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">service</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">image</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">status</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">port</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">uptime</span>
+            {{range .Docker.Services}}
+            <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Name}}"><span class="sm:hidden text-hl-muted">service: </span>{{.Name}}</span>
+            <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Image}}"><span class="sm:hidden text-hl-muted">image: </span>{{.Image}}</span>
+            <span class="pt-2 sm:pt-1">{{if eq .Health "healthy"}}<span class="text-hl-ok">{{.State}} (healthy)</span>{{else if eq .Health "unhealthy"}}<span class="text-hl-warn">{{.State}} (unhealthy)</span>{{else}}{{.State}}{{end}}</span>
+            <span class="min-w-0 truncate pt-2 sm:pt-1">{{if .Ports}}{{range $i, $p := .Ports}}{{if $i}}, {{end}}{{$p}}{{end}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
+            <span class="pt-2 sm:pt-1">{{.Uptime}}</span>
+            <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="text-hl-muted">no infra services found on homelab-net</p>
+          {{end}}
+        {{else}}
+        <p class="text-hl-muted" title="opt in via DOCKER_SOCK_PATH in .env">{{.Docker.Reason}}</p>
+        {{end}}
+      </div>
     </div>
   </div>
 </body>

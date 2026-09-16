@@ -1,0 +1,33 @@
+{{define "head"}}
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>homelab dev container</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            hl: {
+              bg: '#111111',
+              text: '#dddddd',
+              accent: '#99ccff',
+              ok: '#66ff66',
+              warn: '#ffcc66',
+              muted: '#888888',
+              border: '#333333',
+            },
+          },
+        },
+      },
+    };
+  </script>
+{{end}}
+
+{{define "nav"}}
+  <nav class="flex gap-6 border-b border-hl-border mt-8 mb-8">
+    <a href="/" class="pb-2 -mb-px {{if eq .Active "dashboard"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">dashboard</a>
+    <a href="/repos" class="pb-2 -mb-px {{if eq .Active "repos"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">repos</a>
+    <a href="/agents" class="pb-2 -mb-px {{if eq .Active "agents"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">agents</a>
+  </nav>
+{{end}}
