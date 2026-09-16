@@ -40,6 +40,25 @@ type pageView struct {
 	Active string
 }
 
+// reposView is the template data for the "repos" tab: the GitHub repo list
+// (or a disabled/error reason if it couldn't be fetched) plus any in-flight
+// or completed clone jobs, keyed by repo name for per-row lookup.
+type reposView struct {
+	Active  string
+	Enabled bool
+	Reason  string
+	Repos   []repoListing
+	Jobs    map[string]*cloneJob
+}
+
+func jobsByName(jobs []*cloneJob) map[string]*cloneJob {
+	m := make(map[string]*cloneJob, len(jobs))
+	for _, j := range jobs {
+		m[j.Repo] = j
+	}
+	return m
+}
+
 // shortID truncates an id for compact table display, e.g. a UUID
 func shortID(id string) string {
 	const n = 8
@@ -110,7 +129,15 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRepos(w http.ResponseWriter, r *http.Request) {
-	if err := pageTmpl.ExecuteTemplate(w, "repos.html", pageView{Active: "repos"}); err != nil {
+	status := gatherRepoList(githubToken)
+	view := reposView{
+		Active:  "repos",
+		Enabled: status.Enabled,
+		Reason:  status.Reason,
+		Repos:   status.Repos,
+		Jobs:    jobsByName(listCloneJobs()),
+	}
+	if err := pageTmpl.ExecuteTemplate(w, "repos.html", view); err != nil {
 		log.Printf("failed to render repos page: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -130,6 +157,56 @@ func isCoveragePath(urlPath string) bool {
 	return slices.Contains(strings.Split(path.Clean(urlPath), "/"), "coverage")
 }
 
+// handleAPIReposClone triggers a background clone of the repo named in the
+// "name"/"clone_url" form fields, returning the created job as JSON.
+// POST-only, since it has a side effect.
+func handleAPIReposClone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	job, err := startClone(r.FormValue("name"), r.FormValue("clone_url"), githubToken)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(job); err != nil {
+		log.Printf("failed to encode clone response: %v", err)
+	}
+}
+
+// handleAPIReposStatus reports every known clone job, for the repos tab to
+// poll while a clone is in progress.
+func handleAPIReposStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(listCloneJobs()); err != nil {
+		log.Printf("failed to encode repos status response: %v", err)
+	}
+}
+
+// isSafeRepoName reports whether name is safe to use as a single path
+// segment under workspaceDir (e.g. via filepath.Join(workspaceDir, name))
+// or in an exec.Command argument — rejecting anything empty, containing a
+// path separator, or a "." / ".." traversal segment.
+func isSafeRepoName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	return true
+}
+
 func coverageOnly(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isCoveragePath(r.URL.Path) {
@@ -144,10 +221,16 @@ func main() {
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASSWORD")
 
+	if msg := githubExposureWarning(adminUser, adminPass, githubToken); msg != "" {
+		log.Println(msg)
+	}
+
 	http.HandleFunc("/healthz", handleHealthz)
 	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
 	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
 	http.Handle("/repos", withAuth(adminUser, adminPass, http.HandlerFunc(handleRepos)))
+	http.Handle("/api/repos/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposClone)))
+	http.Handle("/api/repos/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposStatus)))
 	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
 	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
 

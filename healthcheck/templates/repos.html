@@ -2,6 +2,7 @@
 <html>
 <head>
   {{template "head" .}}
+  <meta http-equiv="refresh" content="10">
 </head>
 <body class="font-mono bg-hl-bg text-hl-text">
   <div class="max-w-3xl mx-auto p-8">
@@ -9,7 +10,96 @@
 
     {{template "nav" .}}
 
-    <p class="text-hl-muted">repos &mdash; coming soon</p>
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">github repos</h2>
+      <div class="mt-2">
+        {{if .Enabled}}
+          {{if .Repos}}
+          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto_auto] gap-x-6 gap-y-1">
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">repo</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">description</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">visibility</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">action</span>
+            {{range .Repos}}
+            <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.FullName}}"><span class="sm:hidden text-hl-muted">repo: </span>{{.FullName}}</span>
+            <span class="min-w-0 truncate pt-2 sm:pt-1">{{if .Description}}{{.Description}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
+            <span class="pt-2 sm:pt-1">{{if .Private}}private{{else}}public{{end}}</span>
+            <span class="pt-2 sm:pt-1" id="repo-status-{{.Name}}">
+              {{$job := index $.Jobs .Name}}
+              {{if $job}}
+                {{if eq $job.State "succeeded"}}<span class="text-hl-ok">cloned</span>
+                {{else if eq $job.State "failed"}}<span class="text-hl-warn" title="{{$job.Error}}">failed</span>
+                {{else}}<span class="text-hl-muted">cloning&hellip;</span>
+                {{end}}
+              {{else}}
+              <form method="post" action="/api/repos/clone" class="inline">
+                <input type="hidden" name="name" value="{{.Name}}">
+                <input type="hidden" name="clone_url" value="{{.CloneURL}}">
+                <button type="submit" class="text-hl-accent underline">clone</button>
+              </form>
+              {{end}}
+            </span>
+            <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="text-hl-muted">no repos found for this token</p>
+          {{end}}
+        {{else}}
+        <p class="text-hl-muted">{{.Reason}}</p>
+        {{end}}
+      </div>
+    </div>
   </div>
+  <script>
+    (function () {
+      function updateRow(name, job) {
+        var el = document.getElementById('repo-status-' + name);
+        if (!el || !job) return;
+        el.textContent = '';
+        var span = document.createElement('span');
+        if (job.state === 'succeeded') {
+          span.className = 'text-hl-ok';
+          span.textContent = 'cloned';
+        } else if (job.state === 'failed') {
+          span.className = 'text-hl-warn';
+          span.title = job.error || '';
+          span.textContent = 'failed';
+        } else {
+          span.className = 'text-hl-muted';
+          span.textContent = 'cloning…';
+        }
+        el.appendChild(span);
+      }
+
+      function poll(name) {
+        fetch('/api/repos/status')
+          .then(function (r) { return r.json(); })
+          .then(function (jobs) {
+            var job = (jobs || []).find(function (j) { return j.repo === name; });
+            if (!job) return;
+            updateRow(name, job);
+            if (job.state !== 'succeeded' && job.state !== 'failed') {
+              setTimeout(function () { poll(name); }, 2000);
+            }
+          })
+          .catch(function () {});
+      }
+
+      document.querySelectorAll('form[action="/api/repos/clone"]').forEach(function (form) {
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var data = new FormData(form);
+          fetch('/api/repos/clone', { method: 'POST', body: new URLSearchParams(data) })
+            .then(function (r) { return r.json(); })
+            .then(function (job) {
+              updateRow(job.repo, job);
+              poll(job.repo);
+            })
+            .catch(function () {});
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

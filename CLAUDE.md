@@ -130,10 +130,11 @@ Runs before the container's `CMD`. Responsibilities, in order:
 A small embedded Go HTTP service, split by concern:
 - `main.go` — HTTP handlers and routing: `/healthz` (cheap liveness check Docker's
   `HEALTHCHECK` polls — deliberately avoids shelling out or scanning repos), `/api/status`
-  (full JSON status), `/` (HTML dashboard, template embedded via `go:embed`), and
-  `/files/` (a file server restricted to serving only paths that pass through a directory
-  literally named `coverage` — see `isCoveragePath`/`coverageOnly` — not general workspace
-  file access).
+  (full JSON status), `/` (HTML dashboard, template embedded via `go:embed`), `/repos`
+  (the repos tab — see below), `/api/repos/clone` and `/api/repos/status` (repos tab
+  backing endpoints, see below), and `/files/` (a file server restricted to serving only
+  paths that pass through a directory literally named `coverage` — see
+  `isCoveragePath`/`coverageOnly` — not general workspace file access).
 - `status.go` — gathers the status payload: tool versions, workspace disk usage, memory,
   load average, and a one-level-deep scan of `/root/workspace` for git repos (branch,
   dirty state).
@@ -142,6 +143,16 @@ A small embedded Go HTTP service, split by concern:
   percentage from either an Istanbul `coverage-summary.json` or an `lcov.info`, plus
   locating an HTML report (`lcov-report/index.html` or `index.html`) to link to via
   `/files/`.
+- `github.go` — a stdlib-only GitHub API client (`GITHUB_TOKEN` env var, a classic PAT)
+  that lists the token's repos for the repos tab, degrading to a disabled/reason state
+  (mirroring `dockerStatus` in `docker.go`) rather than erroring when the token is unset
+  or the GitHub API call fails.
+- `clone.go` — an in-memory, mutex-guarded background job store for `git clone`
+  operations triggered from the repos tab (`handleAPIReposClone`/`handleAPIReposStatus`
+  in `main.go`, polled by the repos tab's own JS). Validates the destination via
+  `isSafeRepoName` before touching the filesystem, supplies the GitHub token to git via a
+  `GIT_ASKPASS` helper (never embedded in the clone URL or process argv), and removes the
+  destination directory if a clone fails.
 
 ### Claude Code skills (`.claude/skills/`)
 

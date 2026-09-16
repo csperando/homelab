@@ -22,6 +22,18 @@ func basicAuth(user, pass string, next http.Handler) http.Handler {
 	})
 }
 
+// githubExposureWarning returns a warning message when a GitHub token is
+// configured but auth is (fully or partially) disabled, since the repos
+// tab's clone functionality — and the token itself — would then be
+// reachable by anyone who can reach the dashboard. Returns "" when there's
+// nothing to warn about.
+func githubExposureWarning(adminUser, adminPass, githubToken string) string {
+	if githubToken == "" || (adminUser != "" && adminPass != "") {
+		return ""
+	}
+	return "WARNING: GITHUB_TOKEN is set but ADMIN_USER/ADMIN_PASSWORD are not fully configured — repo cloning (and the configured token) is exposed unauthenticated"
+}
+
 // withAuth wraps next with basicAuth, unless user or pass is empty — in
 // which case it fails open and serves next unauthenticated, logging a
 // warning. This lets an unconfigured environment keep serving the

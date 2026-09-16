@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,29 @@ func TestIsCoveragePath(t *testing.T) {
 	for _, c := range cases {
 		if got := isCoveragePath(c.path); got != c.want {
 			t.Errorf("isCoveragePath(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+func TestIsSafeRepoName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"my-repo", true},
+		{"my_repo.go", true},
+		{"", false},
+		{".", false},
+		{"..", false},
+		{"a/b", false},
+		{"../etc", false},
+		{"foo/../bar", false},
+		{"/etc/passwd", false},
+		{"a\\b", false},
+	}
+	for _, c := range cases {
+		if got := isSafeRepoName(c.name); got != c.want {
+			t.Errorf("isSafeRepoName(%q) = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -199,7 +223,9 @@ func TestHandleDashboard(t *testing.T) {
 	}
 }
 
-func TestHandleRepos(t *testing.T) {
+func TestHandleRepos_NoToken(t *testing.T) {
+	withGithubToken(t, "")
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
 	handleRepos(rec, req)
@@ -208,10 +234,110 @@ func TestHandleRepos(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<html", "repos", "coming soon"} {
+	for _, want := range []string{"<html", "repos", "GITHUB_TOKEN not set"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("repos body missing %q", want)
 		}
+	}
+}
+
+func TestHandleRepos_WithRepos(t *testing.T) {
+	resetCloneJobs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"full_name": "octocat/hello-world",
+				"name":      "hello-world",
+				"private":   false,
+				"clone_url": "https://github.com/octocat/hello-world.git",
+			},
+		})
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
+	handleRepos(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"octocat/hello-world", "clone"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("repos body missing %q", want)
+		}
+	}
+}
+
+func TestHandleAPIReposClone_MethodNotAllowed(t *testing.T) {
+	resetCloneJobs(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/repos/clone", nil)
+	handleAPIReposClone(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIReposClone_InvalidName(t *testing.T) {
+	resetCloneJobs(t)
+	withWorkspaceDir(t, t.TempDir())
+
+	form := url.Values{"name": {"../escape"}, "clone_url": {"https://example.com/repo.git"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/repos/clone", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIReposClone(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIReposClone_SuccessAndStatus(t *testing.T) {
+	resetCloneJobs(t)
+	ws := t.TempDir()
+	withWorkspaceDir(t, ws)
+	bareRepo := bareRepoFixture(t)
+
+	form := url.Values{"name": {"cloned-via-api"}, "clone_url": {bareRepo}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/repos/clone", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIReposClone(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var job cloneJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if job.Repo != "cloned-via-api" {
+		t.Errorf("job.Repo = %q, want cloned-via-api", job.Repo)
+	}
+
+	waitForJobDone(t, "cloned-via-api", 5*time.Second)
+
+	statusRec := httptest.NewRecorder()
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/repos/status", nil)
+	handleAPIReposStatus(statusRec, statusReq)
+
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status endpoint status = %d, want 200", statusRec.Code)
+	}
+	var jobs []cloneJob
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &jobs); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Repo != "cloned-via-api" || jobs[0].State != cloneStateSucceeded {
+		t.Errorf("jobs = %+v, want one succeeded job for cloned-via-api", jobs)
 	}
 }
 
