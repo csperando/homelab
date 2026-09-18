@@ -15,6 +15,9 @@ services:
     build: .
     container_name: homelab
     networks: [homelab-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     ports:

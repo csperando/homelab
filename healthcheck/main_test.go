@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -223,26 +225,28 @@ func TestHandleDashboard(t *testing.T) {
 	}
 }
 
-func TestHandleRepos_NoToken(t *testing.T) {
+func TestHandleWorkspaces_NoToken(t *testing.T) {
 	withGithubToken(t, "")
+	withDB(t, nil)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	handleRepos(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/workspaces", nil)
+	handleWorkspaces(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<html", "repos", "GITHUB_TOKEN not set"} {
+	for _, want := range []string{"<html", "workspaces", "GITHUB_TOKEN not set"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("repos body missing %q", want)
+			t.Errorf("workspaces body missing %q", want)
 		}
 	}
 }
 
-func TestHandleRepos_WithRepos(t *testing.T) {
+func TestHandleWorkspaces_WithGithubRepos(t *testing.T) {
 	resetCloneJobs(t)
+	withDB(t, nil)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]map[string]any{
@@ -259,8 +263,8 @@ func TestHandleRepos_WithRepos(t *testing.T) {
 	withGithubToken(t, "test-token")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	handleRepos(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/workspaces", nil)
+	handleWorkspaces(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -268,39 +272,97 @@ func TestHandleRepos_WithRepos(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{"octocat/hello-world", "clone"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("repos body missing %q", want)
+			t.Errorf("workspaces body missing %q", want)
 		}
 	}
 }
 
-func TestHandleAPIReposClone_MethodNotAllowed(t *testing.T) {
+// TestHandleWorkspaces_PostgresUnreachable confirms the workspaces section
+// degrades with a Reason (rather than 500ing the whole page) when db is nil
+// — independent of the unrelated GitHub-token failure domain.
+func TestHandleWorkspaces_PostgresUnreachable(t *testing.T) {
+	withGithubToken(t, "")
+	withDB(t, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/workspaces", nil)
+	handleWorkspaces(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "postgres unavailable") {
+		t.Errorf("workspaces body missing the postgres-unavailable reason: %s", rec.Body.String())
+	}
+}
+
+// TestHandleWorkspaces_ListsPersistedWorkspaces exercises the happy path
+// against a real Postgres (skipping if unreachable), confirming a persisted
+// workspace's name/branch/dirty are rendered.
+func TestHandleWorkspaces_ListsPersistedWorkspaces(t *testing.T) {
+	withGithubToken(t, "")
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	ws := t.TempDir()
+	withWorkspaceDir(t, ws)
+	repoDir := filepath.Join(ws, "handler-test-repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, repoDir)
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, repoDir) })
+
+	if err := UpsertWorkspace(dbConn, "handler-test-repo", repoDir, "https://example.com/x.git"); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/workspaces", nil)
+	handleWorkspaces(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"handler-test-repo", "main"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("workspaces body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestHandleAPIWorkspacesClone_MethodNotAllowed(t *testing.T) {
 	resetCloneJobs(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/repos/clone", nil)
-	handleAPIReposClone(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/clone", nil)
+	handleAPIWorkspacesClone(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 
-func TestHandleAPIReposClone_InvalidName(t *testing.T) {
+func TestHandleAPIWorkspacesClone_InvalidName(t *testing.T) {
 	resetCloneJobs(t)
 	withWorkspaceDir(t, t.TempDir())
 
 	form := url.Values{"name": {"../escape"}, "clone_url": {"https://example.com/repo.git"}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/repos/clone", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/clone", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handleAPIReposClone(rec, req)
+	handleAPIWorkspacesClone(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
-func TestHandleAPIReposClone_SuccessAndStatus(t *testing.T) {
+func TestHandleAPIWorkspacesClone_SuccessAndStatus(t *testing.T) {
 	resetCloneJobs(t)
 	ws := t.TempDir()
 	withWorkspaceDir(t, ws)
@@ -308,9 +370,9 @@ func TestHandleAPIReposClone_SuccessAndStatus(t *testing.T) {
 
 	form := url.Values{"name": {"cloned-via-api"}, "clone_url": {bareRepo}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/repos/clone", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/clone", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	handleAPIReposClone(rec, req)
+	handleAPIWorkspacesClone(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -326,8 +388,8 @@ func TestHandleAPIReposClone_SuccessAndStatus(t *testing.T) {
 	waitForJobDone(t, "cloned-via-api", 5*time.Second)
 
 	statusRec := httptest.NewRecorder()
-	statusReq := httptest.NewRequest(http.MethodGet, "/api/repos/status", nil)
-	handleAPIReposStatus(statusRec, statusReq)
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/workspaces/status", nil)
+	handleAPIWorkspacesStatus(statusRec, statusReq)
 
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("status endpoint status = %d, want 200", statusRec.Code)

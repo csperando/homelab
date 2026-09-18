@@ -94,8 +94,10 @@ anything placed there at build time would be shadowed by the mount.
 
 ### CI/CD and server deployment
 
-- `.github/workflows/ci.yml` — on every PR to `main`: `go test`, `docker compose config`
-  validation, and a no-push image build. GitHub-hosted; `contents: read` only.
+- `.github/workflows/ci.yml` — on every PR to `main`: `go test` (against a `postgres:17-
+  alpine` service container, so Postgres-backed tests run for real rather than skipping),
+  `docker compose config` validation, and a no-push image build. GitHub-hosted;
+  `contents: read` only.
 - `.github/workflows/deploy.yml` — on push to `main` (or `workflow_dispatch`): a
   GitHub-hosted `build-push` job builds the multi-arch image and pushes `:latest` +
   `:sha-<short>` to GHCR, then a `deploy` job **on a self-hosted runner on the dev server**
@@ -129,12 +131,13 @@ Runs before the container's `CMD`. Responsibilities, in order:
 
 A small embedded Go HTTP service, split by concern:
 - `main.go` — HTTP handlers and routing: `/healthz` (cheap liveness check Docker's
-  `HEALTHCHECK` polls — deliberately avoids shelling out or scanning repos), `/api/status`
-  (full JSON status), `/` (HTML dashboard, template embedded via `go:embed`), `/repos`
-  (the repos tab — see below), `/api/repos/clone` and `/api/repos/status` (repos tab
-  backing endpoints, see below), and `/files/` (a file server restricted to serving only
-  paths that pass through a directory literally named `coverage` — see
-  `isCoveragePath`/`coverageOnly` — not general workspace file access).
+  `HEALTHCHECK` polls — deliberately avoids shelling out, scanning repos, or touching
+  Postgres), `/api/status` (full JSON status), `/` (HTML dashboard, template embedded via
+  `go:embed`), `/workspaces` (the workspaces tab, formerly "repos" — see below),
+  `/api/workspaces/clone` and `/api/workspaces/status` (workspaces tab backing endpoints,
+  see below), and `/files/` (a file server restricted to serving only paths that pass
+  through a directory literally named `coverage` — see `isCoveragePath`/`coverageOnly` —
+  not general workspace file access).
 - `status.go` — gathers the status payload: tool versions, workspace disk usage, memory,
   load average, and a one-level-deep scan of `/root/workspace` for git repos (branch,
   dirty state).
@@ -144,15 +147,34 @@ A small embedded Go HTTP service, split by concern:
   locating an HTML report (`lcov-report/index.html` or `index.html`) to link to via
   `/files/`.
 - `github.go` — a stdlib-only GitHub API client (`GITHUB_TOKEN` env var, a classic PAT)
-  that lists the token's repos for the repos tab, degrading to a disabled/reason state
-  (mirroring `dockerStatus` in `docker.go`) rather than erroring when the token is unset
-  or the GitHub API call fails.
+  that lists the token's repos for the workspaces tab, degrading to a disabled/reason
+  state (mirroring `dockerStatus` in `docker.go`) rather than erroring when the token is
+  unset or the GitHub API call fails.
 - `clone.go` — an in-memory, mutex-guarded background job store for `git clone`
-  operations triggered from the repos tab (`handleAPIReposClone`/`handleAPIReposStatus`
-  in `main.go`, polled by the repos tab's own JS). Validates the destination via
-  `isSafeRepoName` before touching the filesystem, supplies the GitHub token to git via a
-  `GIT_ASKPASS` helper (never embedded in the clone URL or process argv), and removes the
-  destination directory if a clone fails.
+  operations triggered from the workspaces tab (`handleAPIWorkspacesClone`/
+  `handleAPIWorkspacesStatus` in `main.go`, polled by the tab's own JS). Validates the
+  destination via `isSafeRepoName` before touching the filesystem, supplies the GitHub
+  token to git via a `GIT_ASKPASS` helper (never embedded in the clone URL or process
+  argv), removes the destination directory if a clone fails, and on success persists a
+  `workspaces` row (best-effort — a Postgres hiccup never fails an otherwise-successful
+  clone).
+- `db.go` — opens the process-wide Postgres connection pool
+  (`POSTGRES_HOST`/`POSTGRES_PORT`/`POSTGRES_USER`/`POSTGRES_PASSWORD`/
+  `POSTGRES_DATABASE`, via `pgx/v5/stdlib`, pinned to v5.7.4 — the newest release still
+  compatible with Ubuntu 24.04's packaged Go 1.22, since pgx v5.7.5+ requires Go 1.23+).
+  Connecting is best-effort at startup (retried, then a warning and DB-backed features
+  disabled — never crashes the dashboard). The package-level `db` (`*sql.DB`, possibly
+  nil) is passed explicitly to callers rather than referenced implicitly, unlike
+  `githubHTTPClient`/`dockerHTTPClient`.
+- `migrations.go` + `migrations/*.sql` — an embedded (`go:embed`) SQL migration runner,
+  applied idempotently at startup (tracked in a `schema_migrations` table) before the HTTP
+  server starts serving. A migration failure is fatal (`log.Fatalf`) — distinct from
+  Postgres simply being unreachable, which degrades instead.
+- `workspaces.go` — the `workspaces` table's repository layer (`UpsertWorkspace`,
+  `ListWorkspaces`) plus `backfillWorkspaces` (fills in any repo already on disk under
+  `workspaceDir` that predates this feature) and `mergeWorkspaceRows` (joins persisted
+  workspaces with `scanWorkspaceRepos`' live branch/dirty state by path at request time —
+  branch/dirty are intentionally never persisted, so they can't go stale).
 
 ### Claude Code skills (`.claude/skills/`)
 

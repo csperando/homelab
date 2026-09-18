@@ -49,15 +49,21 @@ type pageView struct {
 	Active string
 }
 
-// reposView is the template data for the "repos" tab: the GitHub repo list
-// (or a disabled/error reason if it couldn't be fetched) plus any in-flight
-// or completed clone jobs, keyed by repo name for per-row lookup.
-type reposView struct {
-	Active  string
-	Enabled bool
-	Reason  string
-	Repos   []repoListing
-	Jobs    map[string]*cloneJob
+// workspacesView is the template data for the "workspaces" tab (formerly
+// "repos"): the GitHub repo list (or a disabled/error reason if it couldn't
+// be fetched) plus any in-flight or completed clone jobs, keyed by repo
+// name for per-row lookup — and, independently, the persisted Workspace
+// list (or its own disabled/error reason, since Postgres and GitHub are
+// unrelated failure domains).
+type workspacesView struct {
+	Active            string
+	Enabled           bool
+	Reason            string
+	Repos             []repoListing
+	Jobs              map[string]*cloneJob
+	WorkspacesEnabled bool
+	WorkspacesReason  string
+	Workspaces        []workspaceRow
 }
 
 // logsView is the template data for the "logs" tab.
@@ -147,17 +153,31 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleRepos(w http.ResponseWriter, r *http.Request) {
+// handleWorkspaces renders the workspaces tab, merging the persisted
+// Workspace list (Postgres) with live branch/dirty state (scanWorkspaceRepos)
+// alongside the existing GitHub-repo-listing/clone flow. The two sections
+// degrade independently: a missing GITHUB_TOKEN doesn't hide the workspace
+// list, and an unreachable Postgres doesn't hide the GitHub repo list.
+func handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	status := gatherRepoList(githubToken)
-	view := reposView{
-		Active:  "repos",
+	view := workspacesView{
+		Active:  "workspaces",
 		Enabled: status.Enabled,
 		Reason:  status.Reason,
 		Repos:   status.Repos,
 		Jobs:    jobsByName(listCloneJobs()),
 	}
-	if err := pageTmpl.ExecuteTemplate(w, "repos.html", view); err != nil {
-		log.Printf("failed to render repos page: %v", err)
+
+	workspaces, err := ListWorkspaces(db)
+	if err != nil {
+		view.WorkspacesReason = err.Error()
+	} else {
+		view.WorkspacesEnabled = true
+		view.Workspaces = mergeWorkspaceRows(workspaces, scanWorkspaceRepos())
+	}
+
+	if err := pageTmpl.ExecuteTemplate(w, "workspaces.html", view); err != nil {
+		log.Printf("failed to render workspaces page: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
@@ -211,10 +231,10 @@ func isCoveragePath(urlPath string) bool {
 	return slices.Contains(strings.Split(path.Clean(urlPath), "/"), "coverage")
 }
 
-// handleAPIReposClone triggers a background clone of the repo named in the
-// "name"/"clone_url" form fields, returning the created job as JSON.
+// handleAPIWorkspacesClone triggers a background clone of the repo named in
+// the "name"/"clone_url" form fields, returning the created job as JSON.
 // POST-only, since it has a side effect.
-func handleAPIReposClone(w http.ResponseWriter, r *http.Request) {
+func handleAPIWorkspacesClone(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -238,12 +258,12 @@ func handleAPIReposClone(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleAPIReposStatus reports every known clone job, for the repos tab to
-// poll while a clone is in progress.
-func handleAPIReposStatus(w http.ResponseWriter, r *http.Request) {
+// handleAPIWorkspacesStatus reports every known clone job, for the
+// workspaces tab to poll while a clone is in progress.
+func handleAPIWorkspacesStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(listCloneJobs()); err != nil {
-		log.Printf("failed to encode repos status response: %v", err)
+		log.Printf("failed to encode workspaces status response: %v", err)
 	}
 }
 
@@ -279,12 +299,29 @@ func main() {
 		log.Println(msg)
 	}
 
+	// Postgres is best-effort at startup: an unreachable database disables
+	// DB-backed features (degrading like every other optional integration
+	// in this package) rather than crashing the whole dashboard. A failed
+	// migration is different — it means the code and an actually-reachable
+	// database have drifted — and is fatal.
+	if conn, err := openDB(); err != nil {
+		log.Printf("postgres unavailable, DB-backed features disabled: %v", err)
+	} else {
+		db = conn
+		if err := runMigrations(db); err != nil {
+			log.Fatalf("running migrations: %v", err)
+		}
+		if err := backfillWorkspaces(db); err != nil {
+			log.Printf("backfilling workspaces: %v", err)
+		}
+	}
+
 	http.HandleFunc("/healthz", handleHealthz)
 	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
 	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
-	http.Handle("/repos", withAuth(adminUser, adminPass, http.HandlerFunc(handleRepos)))
-	http.Handle("/api/repos/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposClone)))
-	http.Handle("/api/repos/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposStatus)))
+	http.Handle("/workspaces", withAuth(adminUser, adminPass, http.HandlerFunc(handleWorkspaces)))
+	http.Handle("/api/workspaces/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesClone)))
+	http.Handle("/api/workspaces/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesStatus)))
 	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
 	http.Handle("/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleLogs)))
 	http.Handle("/api/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPILogs)))

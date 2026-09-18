@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,6 +120,63 @@ func TestStartClone_FailureCleansUpDestination(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(ws, "badrepo")); !os.IsNotExist(err) {
 		t.Errorf("expected destination to be cleaned up after a failed clone, stat err = %v", err)
+	}
+}
+
+// withDB points the package-level db var at conn (which may be nil) for the
+// duration of the test, restoring the previous value after.
+func withDB(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	orig := db
+	t.Cleanup(func() { db = orig })
+	db = conn
+}
+
+func TestStartClone_PersistsWorkspaceOnSuccess(t *testing.T) {
+	resetCloneJobs(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	ws := t.TempDir()
+	withWorkspaceDir(t, ws)
+	bareRepo := bareRepoFixture(t)
+	dest := filepath.Join(ws, "persisted-repo")
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, dest) })
+
+	if _, err := startClone("persisted-repo", bareRepo, ""); err != nil {
+		t.Fatalf("startClone: %v", err)
+	}
+	waitForJobDone(t, "persisted-repo", 5*time.Second)
+
+	got, err := findWorkspaceByPath(dbConn, dest)
+	if err != nil {
+		t.Fatalf("findWorkspaceByPath() after successful clone = %v, want nil", err)
+	}
+	if got.Name != "persisted-repo" || got.RepoURL != bareRepo {
+		t.Errorf("persisted workspace = %+v, want name=persisted-repo repo_url=%s", got, bareRepo)
+	}
+}
+
+// TestStartClone_Success_NilDBDoesNotFailClone confirms a clone still
+// succeeds when Postgres is unreachable (db == nil) — persistence is
+// best-effort groundwork, not load-bearing for the clone flow itself.
+func TestStartClone_Success_NilDBDoesNotFailClone(t *testing.T) {
+	resetCloneJobs(t)
+	withDB(t, nil)
+	ws := t.TempDir()
+	withWorkspaceDir(t, ws)
+	bareRepo := bareRepoFixture(t)
+
+	if _, err := startClone("no-db-repo", bareRepo, ""); err != nil {
+		t.Fatalf("startClone: %v", err)
+	}
+
+	done := waitForJobDone(t, "no-db-repo", 5*time.Second)
+	if done.State != cloneStateSucceeded {
+		t.Fatalf("job state = %q, want succeeded even with db == nil (error: %s)", done.State, done.Error)
 	}
 }
 

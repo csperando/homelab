@@ -116,6 +116,13 @@ func runClone(job *cloneJob, dest, cloneURL, token string) {
 
 	setJobState(job, cloneStateSucceeded, "")
 	log.Printf("clone: %s succeeded", job.Repo)
+
+	// Persisting the workspace record is best-effort: a clone that
+	// otherwise succeeded must not be reported as failed just because
+	// Postgres is unreachable (db may be nil) or the write itself errors.
+	if err := UpsertWorkspace(db, job.Repo, dest, cloneURL); err != nil {
+		log.Printf("clone: %s succeeded but failed to persist workspace record: %v", job.Repo, err)
+	}
 }
 
 // gitAskpassScript is a static credential helper: it never contains the

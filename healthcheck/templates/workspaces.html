@@ -10,6 +10,35 @@
     {{template "nav" .}}
 
     <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">workspaces</h2>
+      <div class="mt-2">
+        {{if .WorkspacesEnabled}}
+          {{if .Workspaces}}
+          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto_minmax(0,1fr)] gap-x-6 gap-y-1">
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">path</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">branch</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">status</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">config</span>
+            {{range .Workspaces}}
+            <div class="contents">
+            <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Path}}"><span class="sm:hidden text-hl-muted">path: </span>{{.Name}}</span>
+            <span class="pt-2 sm:pt-1">{{if .Branch}}{{.Branch}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
+            <span class="pt-2 sm:pt-1">{{if .Dirty}}<span class="text-hl-warn">dirty</span>{{else}}<span class="text-hl-ok">clean</span>{{end}}</span>
+            <span class="min-w-0 truncate pt-2 sm:pt-1 text-hl-muted" title="{{.EnvConfig}}">{{.EnvConfig}}</span>
+            <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
+            </div>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="text-hl-muted">no workspaces yet &mdash; clone a repo below</p>
+          {{end}}
+        {{else}}
+        <p class="text-hl-muted">{{.WorkspacesReason}}</p>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="mt-8">
       <h2 class="text-sky-300 text-sm font-semibold">github repos</h2>
       <div class="mt-2">
         {{if .Enabled}}
@@ -34,7 +63,7 @@
                 {{else}}<span class="text-hl-muted">cloning&hellip;</span>
                 {{end}}
               {{else}}
-              <form method="post" action="/api/repos/clone" class="inline">
+              <form method="post" action="/api/workspaces/clone" class="inline">
                 <input type="hidden" name="name" value="{{.Name}}">
                 <input type="hidden" name="clone_url" value="{{.CloneURL}}">
                 <button type="submit" class="text-hl-accent underline">clone</button>
@@ -109,7 +138,7 @@
       }
 
       function poll(name) {
-        fetch('/api/repos/status')
+        fetch('/api/workspaces/status')
           .then(function (r) { return r.json(); })
           .then(function (jobs) {
             var job = (jobs || []).find(function (j) { return j.repo === name; });
@@ -122,11 +151,11 @@
           .catch(function () {});
       }
 
-      document.querySelectorAll('form[action="/api/repos/clone"]').forEach(function (form) {
+      document.querySelectorAll('form[action="/api/workspaces/clone"]').forEach(function (form) {
         form.addEventListener('submit', function (e) {
           e.preventDefault();
           var data = new FormData(form);
-          fetch('/api/repos/clone', { method: 'POST', body: new URLSearchParams(data) })
+          fetch('/api/workspaces/clone', { method: 'POST', body: new URLSearchParams(data) })
             .then(function (r) { return r.json(); })
             .then(function (job) {
               updateRow(job.repo, job);

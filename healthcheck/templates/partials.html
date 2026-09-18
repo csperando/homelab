@@ -27,7 +27,7 @@
 {{define "nav"}}
   <nav class="flex gap-6 border-b border-hl-border mt-8 mb-8">
     <a href="/" class="pb-2 -mb-px {{if eq .Active "dashboard"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">dashboard</a>
-    <a href="/repos" class="pb-2 -mb-px {{if eq .Active "repos"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">repos</a>
+    <a href="/workspaces" class="pb-2 -mb-px {{if eq .Active "workspaces"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">workspace</a>
     <a href="/logs" class="pb-2 -mb-px {{if eq .Active "logs"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">logs</a>
     <a href="/agents" class="pb-2 -mb-px {{if eq .Active "agents"}}text-white border-b-2 border-sky-300{{else}}text-hl-muted hover:text-hl-text{{end}}">agents</a>
   </nav>
