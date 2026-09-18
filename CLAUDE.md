@@ -143,10 +143,12 @@ A small embedded Go HTTP service, split by concern:
   deliberately *not* behind `withAuth`, since the subprocess has no dashboard
   credentials; authenticated via `agentHookSecret` instead — see `approvals.go`/
   `approvalgate.go` below), and `/api/agents/approvals/decide` (operator-facing, behind
-  `withAuth`, unlike the hook endpoint), and `/files/` (a
-  file server restricted to serving only paths that pass through a directory literally
-  named `coverage` — see `isCoveragePath`/`coverageOnly` — not general workspace file
-  access).
+  `withAuth`, unlike the hook endpoint), `/api/workspaces/polling` (the Workspace tab's
+  per-workspace GitHub issue polling opt-in checkbox, backed by
+  `SetWorkspaceGitHubIssuePolling` — see the GitHub issue polling paragraph below), and
+  `/files/` (a file server restricted to serving only paths that pass through a directory
+  literally named `coverage` — see `isCoveragePath`/`coverageOnly` — not general
+  workspace file access).
 - `status.go` — gathers the status payload: tool versions, workspace disk usage, memory,
   load average, and a one-level-deep scan of `/root/workspace` for git repos (branch,
   dirty state).
@@ -158,7 +160,16 @@ A small embedded Go HTTP service, split by concern:
 - `github.go` — a stdlib-only GitHub API client (`GITHUB_TOKEN` env var, a classic PAT)
   that lists the token's repos for the workspaces tab, degrading to a disabled/reason
   state (mirroring `dockerStatus` in `docker.go`) rather than erroring when the token is
-  unset or the GitHub API call fails.
+  unset or the GitHub API call fails. Also `listGitHubIssues` (filters out entries with a
+  non-null `pull_request` field — GitHub's issues-list API returns both) and
+  `postGitHubIssueComment`, the source and sink the GitHub issue poller uses; both reuse
+  the same `githubHTTPClient`/token, no new scope needed.
+- `githubremote.go` — `githubRemoteOwnerRepo(path)`, resolving the GitHub owner/repo a
+  workspace directory points at by shelling out to `git -C <path> remote get-url origin`
+  and parsing both the HTTPS and SSH remote URL forms. Deliberately not the
+  `workspaces.repo_url` column: every workspace `backfillWorkspaces` creates has an empty
+  `repo_url` (it has none to offer), which would make the poller silently inert against
+  existing workspaces if it relied on the stored column instead.
 - `clone.go` — an in-memory, mutex-guarded background job store for `git clone`
   operations triggered from the workspaces tab (`handleAPIWorkspacesClone`/
   `handleAPIWorkspacesStatus` in `main.go`, polled by the tab's own JS). Validates the
@@ -180,11 +191,13 @@ A small embedded Go HTTP service, split by concern:
   server starts serving. A migration failure is fatal (`log.Fatalf`) — distinct from
   Postgres simply being unreachable, which degrades instead.
 - `workspaces.go` — the `workspaces` table's repository layer (`UpsertWorkspace`,
-  `ListWorkspaces`, `GetWorkspaceByPath`, `GetWorkspaceByID`) plus `backfillWorkspaces`
-  (fills in any repo already on disk under `workspaceDir` that predates this feature) and
-  `mergeWorkspaceRows` (joins persisted workspaces with `scanWorkspaceRepos`' live
-  branch/dirty state by path at request time — branch/dirty are intentionally never
-  persisted, so they can't go stale).
+  `ListWorkspaces`, `GetWorkspaceByPath`, `GetWorkspaceByID`, `SetWorkspaceGitHubIssuePolling`)
+  plus `backfillWorkspaces` (fills in any repo already on disk under `workspaceDir` that
+  predates this feature) and `mergeWorkspaceRows` (joins persisted workspaces with
+  `scanWorkspaceRepos`' live branch/dirty state by path at request time — branch/dirty
+  are intentionally never persisted, so they can't go stale). A workspace's
+  `github_issue_polling_enabled` column (default `false`) is the per-workspace opt-in the
+  GitHub issue poller reads every cycle.
 - `agentruns.go` — the `agent_sessions`/`tasks`/`agent_runs` repository layer
   (`CreateAgentSession`, `GetAgentSession`, `CreateTask`, `GetTask`, `CreateAgentRun`,
   `SetAgentRunClaudeSessionID`, `UpdateAgentRunState`, `GetAgentRun`, `ListAgentRuns`),
@@ -194,7 +207,36 @@ A small embedded Go HTTP service, split by concern:
   previous `healthcheck` process was killed/restarted mid-run). An `agent_runs.state` of
   `awaiting_approval` means a gated action was denied and a decision is pending — see
   `approvals.go`. An `agent_runs.transcript` is only ever written once, when the run
-  finishes — never incrementally (see `agentprocess.go`).
+  finishes — never incrementally (see `agentprocess.go`). A task's nullable
+  `github_issue_number` column is set only for tasks the GitHub issue poller creates;
+  `CreateTask` takes it as an explicit `*int` parameter (`nil` for every manually-started
+  task), and `githubIssueHasTask` is the poller's dedup check (does a task already exist
+  for this workspace/issue number). The approve flow
+  (`handleAPIAgentsApprovalsDecide` in `main.go`) copies the original task's
+  `github_issue_number` into the continuation task it creates — otherwise a Job-created
+  run that pauses for approval would lose track of which issue to comment on once it's
+  later resumed and finishes.
+- `githubissuepoller.go` — this repo's first periodic background loop:
+  `startGitHubIssuePoller`, a `time.NewTicker`-driven goroutine
+  (`GITHUB_ISSUE_POLL_INTERVAL`, default 300s; ticks are consumed one at a time by a
+  single goroutine, so a slow poll cycle delays the next tick rather than ever running
+  two cycles concurrently) started from `main()` only when both Postgres and
+  `GITHUB_TOKEN` are available. Each cycle (`pollGitHubIssuesOnce`) walks every
+  opted-in workspace, resolves its owner/repo via `githubRemoteOwnerRepo`, lists open
+  issues (`listGitHubIssues`), and — for the first issue without an existing task — runs
+  the exact same `CreateAgentSession` → `CreateTask` → `CreateAgentRun` → `startAgentRun`
+  chain `handleAPIAgentsStart` uses for a manual run, so Approval gating applies
+  identically (the real safeguard against issue-text prompt injection driving an
+  unattended `git push`/`rm -rf`, not just pipeline reuse for its own sake). Deliberately
+  starts at most **one** new run per workspace per cycle: `startAgentRun` registers a run
+  in the live-run store asynchronously, inside its own goroutine, only after the `claude`
+  subprocess's `cmd.Start()` returns, so re-checking in-flight state within the same loop
+  iteration can't be trusted to see it yet — capping each cycle to one new run per
+  workspace is what actually prevents two subprocesses starting concurrently against the
+  same working directory, not the check itself. `workspaceRunInProgress` (in
+  `agentprocess.go`) is that in-flight check, shared by this loop and
+  `handleAPIAgentsStart`. A workspace-scoped failure (bad/missing remote, GitHub API
+  error, ...) is logged and skipped, never aborting the rest of the cycle.
 - `approvals.go` — the `approvals` table's repository layer (`CreateApproval`,
   `GetApproval`, `ListApprovalsForRun`, `UpdateApprovalState`). One row per gated tool
   call the `PreToolUse` hook denies; always created `pending`, resolved by the operator
@@ -268,6 +310,18 @@ A small embedded Go HTTP service, split by concern:
   the original run `failed`; approve marks it approved and starts a **new** Agent Run
   (`startResumedAgentRun`) that resumes the original `claude` session — the pending
   Approval's tool call is never retried in place.
+
+  After `finishAgentRun` persists a run's outcome, `writeBackGitHubIssueComment` checks
+  whether the run's task has a `github_issue_number` and, if the final state is
+  genuinely terminal (never `awaiting_approval` — that isn't actually done), posts the
+  run's result as a comment on the originating GitHub issue via `postGitHubIssueComment`.
+  Result text comes from the last `type:"result"` line in the transcript
+  (`extractResultText`, backed by a `Result` field on `claudeJSONLine`), falling back to
+  the run's error message, then a generic note, if neither is available. Best-effort
+  throughout — any failure here is only logged, never affects the run's own
+  already-persisted outcome — and deliberately skipped for a run `ReconcileAgentRuns`
+  marks `interrupted` after a restart (nothing calls it for that path; a disclosed trim,
+  not an oversight).
 
 ### Claude Code skills (`.claude/skills/`)
 

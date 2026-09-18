@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,4 +85,80 @@ func listGitHubRepos(token string) ([]repoListing, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return repos, nil
+}
+
+// githubIssue is the subset of GitHub's issue fields the poller needs.
+// PullRequest is non-nil when this "issue" is actually a pull request —
+// GitHub's issues-list API returns both, and listGitHubIssues filters using
+// it so PRs never spawn an agent run meant for issues.
+type githubIssue struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	PullRequest any    `json:"pull_request"`
+}
+
+// listGitHubIssues lists open issues for owner/repo, filtering out entries
+// that are actually pull requests.
+func listGitHubIssues(token, owner, repo string) ([]githubIssue, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues?state=open", githubAPIBase, owner, repo)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := githubHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+
+	var all []githubIssue
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	issues := make([]githubIssue, 0, len(all))
+	for _, issue := range all {
+		if issue.PullRequest != nil {
+			continue
+		}
+		issues = append(issues, issue)
+	}
+	return issues, nil
+}
+
+// postGitHubIssueComment posts body as a new comment on issue number in
+// owner/repo.
+func postGitHubIssueComment(token, owner, repo string, number int, body string) error {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", githubAPIBase, owner, repo, number)
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return fmt.Errorf("encoding comment body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := githubHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }

@@ -14,17 +14,19 @@
       <div class="mt-2">
         {{if .WorkspacesEnabled}}
           {{if .Workspaces}}
-          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto_minmax(0,1fr)] gap-x-6 gap-y-1">
+          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto_minmax(0,1fr)_auto] gap-x-6 gap-y-1">
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">path</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">branch</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">status</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">config</span>
+            <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">issue polling</span>
             {{range .Workspaces}}
             <div class="contents">
             <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.Path}}"><span class="sm:hidden text-hl-muted">path: </span>{{.Name}}</span>
             <span class="pt-2 sm:pt-1">{{if .Branch}}{{.Branch}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
             <span class="pt-2 sm:pt-1">{{if .Dirty}}<span class="text-hl-warn">dirty</span>{{else}}<span class="text-hl-ok">clean</span>{{end}}</span>
             <span class="min-w-0 truncate pt-2 sm:pt-1 text-hl-muted" title="{{.EnvConfig}}">{{.EnvConfig}}</span>
+            <span class="pt-2 sm:pt-1"><span class="sm:hidden text-hl-muted">issue polling: </span><input type="checkbox" class="workspace-polling-toggle" data-workspace-path="{{.Path}}" {{if .GitHubIssuePollingEnabled}}checked{{end}}></span>
             <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
             </div>
             {{end}}
@@ -150,6 +152,16 @@
           })
           .catch(function () {});
       }
+
+      document.querySelectorAll('.workspace-polling-toggle').forEach(function (checkbox) {
+        checkbox.addEventListener('change', function () {
+          var data = new URLSearchParams();
+          data.set('workspace', checkbox.dataset.workspacePath);
+          data.set('enabled', checkbox.checked ? 'true' : 'false');
+          fetch('/api/workspaces/polling', { method: 'POST', body: data })
+            .catch(function () {});
+        });
+      });
 
       document.querySelectorAll('form[action="/api/workspaces/clone"]').forEach(function (form) {
         form.addEventListener('submit', function (e) {

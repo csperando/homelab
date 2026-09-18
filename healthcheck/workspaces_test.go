@@ -128,6 +128,66 @@ func TestListWorkspaces_OrderedByName(t *testing.T) {
 	}
 }
 
+func TestSetWorkspaceGitHubIssuePolling_NilDB(t *testing.T) {
+	if err := SetWorkspaceGitHubIssuePolling(nil, 1, true); err == nil {
+		t.Fatal("SetWorkspaceGitHubIssuePolling(nil, ...) = nil error, want an error")
+	}
+}
+
+func TestSetWorkspaceGitHubIssuePolling(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	const path = "/root/workspace/test-set-polling"
+	t.Cleanup(func() { db.Exec(`DELETE FROM workspaces WHERE path = $1`, path) })
+
+	if err := UpsertWorkspace(db, "test-set-polling", path, ""); err != nil {
+		t.Fatalf("UpsertWorkspace() = %v, want nil", err)
+	}
+	w, err := findWorkspaceByPath(db, path)
+	if err != nil {
+		t.Fatalf("findWorkspaceByPath() = %v, want nil", err)
+	}
+	if w.GitHubIssuePollingEnabled {
+		t.Fatalf("GitHubIssuePollingEnabled = true right after insert, want false (default)")
+	}
+
+	if err := SetWorkspaceGitHubIssuePolling(db, w.ID, true); err != nil {
+		t.Fatalf("SetWorkspaceGitHubIssuePolling(true) = %v, want nil", err)
+	}
+	got, err := findWorkspaceByPath(db, path)
+	if err != nil {
+		t.Fatalf("findWorkspaceByPath() after enabling = %v, want nil", err)
+	}
+	if !got.GitHubIssuePollingEnabled {
+		t.Error("GitHubIssuePollingEnabled = false after SetWorkspaceGitHubIssuePolling(true), want true")
+	}
+
+	if err := SetWorkspaceGitHubIssuePolling(db, w.ID, false); err != nil {
+		t.Fatalf("SetWorkspaceGitHubIssuePolling(false) = %v, want nil", err)
+	}
+	got, err = findWorkspaceByPath(db, path)
+	if err != nil {
+		t.Fatalf("findWorkspaceByPath() after disabling = %v, want nil", err)
+	}
+	if got.GitHubIssuePollingEnabled {
+		t.Error("GitHubIssuePollingEnabled = true after SetWorkspaceGitHubIssuePolling(false), want false")
+	}
+}
+
+func TestSetWorkspaceGitHubIssuePolling_UnknownID(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	if err := SetWorkspaceGitHubIssuePolling(db, -1, true); err == nil {
+		t.Fatal("SetWorkspaceGitHubIssuePolling(unknown id) = nil error, want an error")
+	}
+}
+
 func TestBackfillWorkspaces_NilDB(t *testing.T) {
 	if err := backfillWorkspaces(nil); err == nil {
 		t.Fatal("backfillWorkspaces(nil) = nil error, want an error")

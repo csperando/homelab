@@ -32,8 +32,8 @@ func TestMigrationNames(t *testing.T) {
 		t.Fatalf("migrationNames() = %v, want nil error", err)
 	}
 
-	if len(names) < 3 {
-		t.Fatalf("migrationNames() = %v, want at least 3 migrations", names)
+	if len(names) < 4 {
+		t.Fatalf("migrationNames() = %v, want at least 4 migrations", names)
 	}
 	if names[0] != "0001_create_workspaces.sql" {
 		t.Errorf("migrationNames()[0] = %q, want %q", names[0], "0001_create_workspaces.sql")
@@ -43,6 +43,9 @@ func TestMigrationNames(t *testing.T) {
 	}
 	if names[2] != "0003_create_approvals.sql" {
 		t.Errorf("migrationNames()[2] = %q, want %q", names[2], "0003_create_approvals.sql")
+	}
+	if names[3] != "0004_github_issue_polling.sql" {
+		t.Errorf("migrationNames()[3] = %q, want %q", names[3], "0004_github_issue_polling.sql")
 	}
 	for i := 1; i < len(names); i++ {
 		if names[i-1] >= names[i] {
@@ -103,7 +106,7 @@ func TestAgentRunsStateCheck_AllowsAwaitingApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAgentSession() = %v, want nil", err)
 	}
-	tk, err := CreateTask(db, session.ID, "prompt")
+	tk, err := CreateTask(db, session.ID, "prompt", nil)
 	if err != nil {
 		t.Fatalf("CreateTask() = %v, want nil", err)
 	}
@@ -118,6 +121,45 @@ func TestAgentRunsStateCheck_AllowsAwaitingApproval(t *testing.T) {
 
 	if _, err := db.Exec(`UPDATE agent_runs SET state = 'not_a_real_state' WHERE id = $1`, run.ID); err == nil {
 		t.Error("UPDATE agent_runs SET state = 'not_a_real_state' = nil error, want the CHECK constraint to still reject unknown values")
+	}
+}
+
+// TestGitHubIssuePollingColumns confirms migration 0004 actually added both
+// new columns with the right default/nullability — a raw SQL check here,
+// independent of the Go repository layer built on top of it (which doesn't
+// exist yet as of this migration; that's a later plan item).
+func TestGitHubIssuePollingColumns(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	var pollingDefault bool
+	if err := db.QueryRow(`
+		INSERT INTO workspaces (name, path) VALUES ('migration-poll-column-check', '/tmp/migration-poll-column-check')
+		RETURNING github_issue_polling_enabled
+	`).Scan(&pollingDefault); err != nil {
+		t.Fatalf("inserting workspace without specifying github_issue_polling_enabled: %v", err)
+	}
+	defer db.Exec(`DELETE FROM workspaces WHERE path = $1`, "/tmp/migration-poll-column-check")
+	if pollingDefault != false {
+		t.Errorf("github_issue_polling_enabled default = %v, want false", pollingDefault)
+	}
+
+	var issueNumber sql.NullInt64
+	workspaceID := seedWorkspace(t, db, "migration-issue-number-column-check")
+	session, err := CreateAgentSession(db, workspaceID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession() = %v, want nil", err)
+	}
+	if err := db.QueryRow(`
+		INSERT INTO tasks (agent_session_id, prompt) VALUES ($1, 'prompt')
+		RETURNING github_issue_number
+	`, session.ID).Scan(&issueNumber); err != nil {
+		t.Fatalf("inserting task without specifying github_issue_number: %v", err)
+	}
+	if issueNumber.Valid {
+		t.Errorf("github_issue_number default = %v, want NULL", issueNumber)
 	}
 }
 

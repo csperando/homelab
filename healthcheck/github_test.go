@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,5 +132,89 @@ func TestGatherRepoList_MalformedJSON(t *testing.T) {
 	}
 	if strings.Contains(got.Reason, "some-token") {
 		t.Errorf("Reason leaked the token: %q", got.Reason)
+	}
+}
+
+func TestListGitHubIssues_FiltersPullRequests(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path + "?" + r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"number": 1, "title": "a real issue", "body": "please fix", "pull_request": nil},
+			{"number": 2, "title": "a pull request", "body": "", "pull_request": map[string]any{"url": "https://api.github.com/x"}},
+			{"number": 3, "title": "another real issue", "body": "", "pull_request": nil},
+		})
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+
+	issues, err := listGitHubIssues("test-token", "octocat", "hello-world")
+	if err != nil {
+		t.Fatalf("listGitHubIssues() = %v, want nil", err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("len(issues) = %d, want 2 (PR filtered out): %+v", len(issues), issues)
+	}
+	if issues[0].Number != 1 || issues[1].Number != 3 {
+		t.Errorf("issue numbers = [%d %d], want [1 3]", issues[0].Number, issues[1].Number)
+	}
+	if gotPath != "/repos/octocat/hello-world/issues?state=open" {
+		t.Errorf("request path = %q, want %q", gotPath, "/repos/octocat/hello-world/issues?state=open")
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer test-token")
+	}
+}
+
+func TestListGitHubIssues_NonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+
+	if _, err := listGitHubIssues("token", "octocat", "hello-world"); err == nil {
+		t.Error("listGitHubIssues() with a 403 response = nil error, want an error")
+	}
+}
+
+func TestPostGitHubIssueComment_Success(t *testing.T) {
+	var gotPath, gotAuth, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+
+	err := postGitHubIssueComment("test-token", "octocat", "hello-world", 42, "the run finished")
+	if err != nil {
+		t.Fatalf("postGitHubIssueComment() = %v, want nil", err)
+	}
+	if gotPath != "/repos/octocat/hello-world/issues/42/comments" {
+		t.Errorf("request path = %q, want %q", gotPath, "/repos/octocat/hello-world/issues/42/comments")
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer test-token")
+	}
+	if !strings.Contains(gotBody, "the run finished") {
+		t.Errorf("request body = %q, want it to contain the comment text", gotBody)
+	}
+}
+
+func TestPostGitHubIssueComment_NonCreatedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+
+	if err := postGitHubIssueComment("token", "octocat", "hello-world", 42, "body"); err == nil {
+		t.Error("postGitHubIssueComment() with a 403 response = nil error, want an error")
 	}
 }

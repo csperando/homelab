@@ -3,6 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -42,7 +45,41 @@ func seedAgentRun(t *testing.T, db *sql.DB, workspaceName string) int64 {
 	if err != nil {
 		t.Fatalf("CreateAgentSession: %v", err)
 	}
-	tk, err := CreateTask(db, session.ID, "test prompt")
+	tk, err := CreateTask(db, session.ID, "test prompt", nil)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	run, err := CreateAgentRun(db, tk.ID)
+	if err != nil {
+		t.Fatalf("CreateAgentRun: %v", err)
+	}
+	return run.ID
+}
+
+// seedAgentRunForGitHubIssue is seedAgentRun's counterpart for the GitHub
+// write-back tests: a real git repo fixture with an origin remote (so
+// githubRemoteOwnerRepo can resolve owner/repo), and a task carrying
+// issueNumber.
+func seedAgentRunForGitHubIssue(t *testing.T, db *sql.DB, workspaceName, owner, repo string, issueNumber int) int64 {
+	t.Helper()
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	setOriginRemote(t, dir, "https://github.com/"+owner+"/"+repo+".git")
+
+	if err := UpsertWorkspace(db, workspaceName, dir, ""); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+	ws, err := GetWorkspaceByPath(db, dir)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByPath: %v", err)
+	}
+	t.Cleanup(func() { cleanupWorkspaceCascade(db, ws.ID) })
+
+	session, err := CreateAgentSession(db, ws.ID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession: %v", err)
+	}
+	tk, err := CreateTask(db, session.ID, "investigate the issue", &issueNumber)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -138,6 +175,28 @@ func TestWorkspaceHasLiveRun(t *testing.T) {
 
 	if _, ok := workspaceHasLiveRun(999); ok {
 		t.Error("workspaceHasLiveRun(other workspace) ok = true, want false")
+	}
+}
+
+func TestWorkspaceRunInProgress(t *testing.T) {
+	resetLiveRuns(t)
+
+	if workspaceRunInProgress(55) {
+		t.Error("workspaceRunInProgress(55) = true before any run is registered, want false")
+	}
+
+	cmd := exec.Command("sleep", "0.2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting test process: %v", err)
+	}
+	defer cmd.Wait()
+	registerLiveRun(101, 55, "sess-101", cmd)
+
+	if !workspaceRunInProgress(55) {
+		t.Error("workspaceRunInProgress(55) = false after registering a live run, want true")
+	}
+	if workspaceRunInProgress(999) {
+		t.Error("workspaceRunInProgress(other workspace) = true, want false")
 	}
 }
 
@@ -681,5 +740,203 @@ func TestHasPendingApproval(t *testing.T) {
 	}
 	if hasPendingApproval(runID) {
 		t.Error("hasPendingApproval() = true after the approval was decided, want false")
+	}
+}
+
+func TestExtractResultText(t *testing.T) {
+	cases := []struct {
+		name       string
+		transcript string
+		want       string
+	}{
+		{
+			name:       "no lines",
+			transcript: "",
+			want:       "",
+		},
+		{
+			name:       "no result line",
+			transcript: `{"type":"system","subtype":"init"}`,
+			want:       "",
+		},
+		{
+			name:       "single result line",
+			transcript: `{"type":"system"}` + "\n" + `{"type":"result","result":"done"}`,
+			want:       "done",
+		},
+		{
+			name: "last result line wins",
+			transcript: `{"type":"result","result":"first"}` + "\n" +
+				`{"type":"system"}` + "\n" +
+				`{"type":"result","result":"second"}`,
+			want: "second",
+		},
+		{
+			name:       "malformed line skipped",
+			transcript: `not valid json` + "\n" + `{"type":"result","result":"done"}`,
+			want:       "done",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractResultText(c.transcript); got != c.want {
+				t.Errorf("extractResultText(%q) = %q, want %q", c.transcript, got, c.want)
+			}
+		})
+	}
+}
+
+func TestWriteBackGitHubIssueComment_SkipsAwaitingApproval(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	runID := seedAgentRunForGitHubIssue(t, dbConn, "wb-awaiting-approval", "octocat", "hello-world", 5)
+
+	writeBackGitHubIssueComment(runID, agentRunAwaitingApproval, `{"type":"result","result":"partial"}`, "")
+
+	if called {
+		t.Error("writeBackGitHubIssueComment() posted a comment for an awaiting_approval run, want no call")
+	}
+}
+
+func TestWriteBackGitHubIssueComment_SkipsWhenTokenUnset(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "")
+
+	runID := seedAgentRunForGitHubIssue(t, dbConn, "wb-no-token", "octocat", "hello-world", 6)
+
+	writeBackGitHubIssueComment(runID, agentRunSucceeded, `{"type":"result","result":"done"}`, "")
+
+	if called {
+		t.Error("writeBackGitHubIssueComment() posted a comment with no GITHUB_TOKEN set, want no call")
+	}
+}
+
+func TestWriteBackGitHubIssueComment_SkipsWhenNoIssueNumber(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	runID := seedAgentRun(t, dbConn, "wb-no-issue-number")
+
+	writeBackGitHubIssueComment(runID, agentRunSucceeded, `{"type":"result","result":"done"}`, "")
+
+	if called {
+		t.Error("writeBackGitHubIssueComment() posted a comment for a task with no github_issue_number, want no call")
+	}
+}
+
+func TestWriteBackGitHubIssueComment_PostsLastResultText(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	runID := seedAgentRunForGitHubIssue(t, dbConn, "wb-posts-result", "octocat", "hello-world", 42)
+
+	transcript := `{"type":"result","result":"first"}` + "\n" + `{"type":"result","result":"final answer"}`
+	writeBackGitHubIssueComment(runID, agentRunSucceeded, transcript, "")
+
+	if gotPath != "/repos/octocat/hello-world/issues/42/comments" {
+		t.Errorf("request path = %q, want %q", gotPath, "/repos/octocat/hello-world/issues/42/comments")
+	}
+	if !strings.Contains(gotBody, "final answer") {
+		t.Errorf("request body = %q, want it to contain the last result line's text", gotBody)
+	}
+}
+
+func TestWriteBackGitHubIssueComment_FallsBackToErrMsg(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	runID := seedAgentRunForGitHubIssue(t, dbConn, "wb-falls-back-errmsg", "octocat", "hello-world", 7)
+
+	writeBackGitHubIssueComment(runID, agentRunFailed, "", "claude exited without a successful result")
+
+	if !strings.Contains(gotBody, "claude exited without a successful result") {
+		t.Errorf("request body = %q, want it to contain the run's error message", gotBody)
+	}
+}
+
+func TestRunAgent_Success_TriggersGitHubWriteBack(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	withGitHubAPIBase(t, srv.URL)
+	withGithubToken(t, "test-token")
+
+	runID := seedAgentRunForGitHubIssue(t, dbConn, "wb-runagent-success", "octocat", "hello-world", 99)
+
+	withAgentRunner(t, `printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"fixed it"}'`)
+	runAgent(runID, 1, t.TempDir(), "investigate issue #99", "")
+
+	if gotPath != "/repos/octocat/hello-world/issues/99/comments" {
+		t.Errorf("request path = %q, want %q", gotPath, "/repos/octocat/hello-world/issues/99/comments")
+	}
+	if !strings.Contains(gotBody, "fixed it") {
+		t.Errorf("request body = %q, want it to contain the run's result text", gotBody)
 	}
 }

@@ -10,7 +10,7 @@ func TestAgentRunsRepo_NilDB(t *testing.T) {
 	if _, err := CreateAgentSession(nil, 1); err == nil {
 		t.Error("CreateAgentSession(nil, ...) = nil error, want an error")
 	}
-	if _, err := CreateTask(nil, 1, "prompt"); err == nil {
+	if _, err := CreateTask(nil, 1, "prompt", nil); err == nil {
 		t.Error("CreateTask(nil, ...) = nil error, want an error")
 	}
 	if _, err := CreateAgentRun(nil, 1); err == nil {
@@ -43,18 +43,23 @@ func seedWorkspace(t *testing.T, db *sql.DB, name string) int64 {
 	if err != nil {
 		t.Fatalf("seedWorkspace: findWorkspaceByPath: %v", err)
 	}
-	t.Cleanup(func() {
-		// approvals must go before agent_runs (it FK-references it) — an
-		// earlier version of this cleanup deleted agent_runs first, which
-		// silently failed on the FK violation (db.Exec's error was never
-		// checked) and left orphaned approvals/agent_runs rows behind.
-		db.Exec(`DELETE FROM approvals WHERE agent_run_id IN (SELECT id FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)))`, w.ID)
-		db.Exec(`DELETE FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1))`, w.ID)
-		db.Exec(`DELETE FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)`, w.ID)
-		db.Exec(`DELETE FROM agent_sessions WHERE workspace_id = $1`, w.ID)
-		db.Exec(`DELETE FROM workspaces WHERE id = $1`, w.ID)
-	})
+	t.Cleanup(func() { cleanupWorkspaceCascade(db, w.ID) })
 	return w.ID
+}
+
+// cleanupWorkspaceCascade deletes a workspace and everything that
+// transitively FK-references it, in FK-safe order (dependents before what
+// they reference) — approvals must go before agent_runs (it FK-references
+// it); an earlier version of this cleanup deleted agent_runs first, which
+// silently failed on the FK violation (db.Exec's error was never checked)
+// and left orphaned approvals/agent_runs rows behind. Shared by every test
+// helper that seeds a workspace with a full session/task/run chain attached.
+func cleanupWorkspaceCascade(db *sql.DB, workspaceID int64) {
+	db.Exec(`DELETE FROM approvals WHERE agent_run_id IN (SELECT id FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)))`, workspaceID)
+	db.Exec(`DELETE FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1))`, workspaceID)
+	db.Exec(`DELETE FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)`, workspaceID)
+	db.Exec(`DELETE FROM agent_sessions WHERE workspace_id = $1`, workspaceID)
+	db.Exec(`DELETE FROM workspaces WHERE id = $1`, workspaceID)
 }
 
 func TestAgentRunsRepo_FullLifecycle(t *testing.T) {
@@ -72,7 +77,7 @@ func TestAgentRunsRepo_FullLifecycle(t *testing.T) {
 		t.Errorf("session.WorkspaceID = %d, want %d", session.WorkspaceID, workspaceID)
 	}
 
-	tk, err := CreateTask(db, session.ID, "say hello")
+	tk, err := CreateTask(db, session.ID, "say hello", nil)
 	if err != nil {
 		t.Fatalf("CreateTask() = %v, want nil", err)
 	}
@@ -152,6 +157,82 @@ func TestAgentRunsRepo_FullLifecycle(t *testing.T) {
 	}
 }
 
+func TestCreateTask_WithGitHubIssueNumber(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	workspaceID := seedWorkspace(t, db, "create-task-issue-number")
+	session, err := CreateAgentSession(db, workspaceID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession() = %v, want nil", err)
+	}
+
+	issueNumber := 42
+	tk, err := CreateTask(db, session.ID, "investigate issue", &issueNumber)
+	if err != nil {
+		t.Fatalf("CreateTask() = %v, want nil", err)
+	}
+	if tk.GitHubIssueNumber == nil || *tk.GitHubIssueNumber != 42 {
+		t.Errorf("tk.GitHubIssueNumber = %v, want pointer to 42", tk.GitHubIssueNumber)
+	}
+
+	got, err := GetTask(db, tk.ID)
+	if err != nil {
+		t.Fatalf("GetTask() = %v, want nil", err)
+	}
+	if got.GitHubIssueNumber == nil || *got.GitHubIssueNumber != 42 {
+		t.Errorf("GetTask().GitHubIssueNumber = %v, want pointer to 42", got.GitHubIssueNumber)
+	}
+}
+
+func TestGitHubIssueHasTask_NilDB(t *testing.T) {
+	if _, err := githubIssueHasTask(nil, 1, 1); err == nil {
+		t.Error("githubIssueHasTask(nil, ...) = nil error, want an error")
+	}
+}
+
+func TestGitHubIssueHasTask(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	workspaceID := seedWorkspace(t, db, "github-issue-has-task")
+	session, err := CreateAgentSession(db, workspaceID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession() = %v, want nil", err)
+	}
+
+	has, err := githubIssueHasTask(db, workspaceID, 7)
+	if err != nil {
+		t.Fatalf("githubIssueHasTask() before task exists = %v, want nil", err)
+	}
+	if has {
+		t.Error("githubIssueHasTask() = true before any task was created, want false")
+	}
+
+	issueNumber := 7
+	if _, err := CreateTask(db, session.ID, "investigate issue #7", &issueNumber); err != nil {
+		t.Fatalf("CreateTask() = %v, want nil", err)
+	}
+
+	has, err = githubIssueHasTask(db, workspaceID, 7)
+	if err != nil {
+		t.Fatalf("githubIssueHasTask() after task exists = %v, want nil", err)
+	}
+	if !has {
+		t.Error("githubIssueHasTask() = false after a matching task was created, want true")
+	}
+
+	has, err = githubIssueHasTask(db, workspaceID, 8)
+	if err != nil {
+		t.Fatalf("githubIssueHasTask() for a different issue number = %v, want nil", err)
+	}
+	if has {
+		t.Error("githubIssueHasTask() = true for an unrelated issue number, want false")
+	}
+}
+
 func TestUpdateAgentRunState_FailedSetsError(t *testing.T) {
 	db := testDB(t)
 	if err := runMigrations(db); err != nil {
@@ -163,7 +244,7 @@ func TestUpdateAgentRunState_FailedSetsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAgentSession() = %v, want nil", err)
 	}
-	tk, err := CreateTask(db, session.ID, "do something")
+	tk, err := CreateTask(db, session.ID, "do something", nil)
 	if err != nil {
 		t.Fatalf("CreateTask() = %v, want nil", err)
 	}
@@ -212,7 +293,7 @@ func TestReconcileAgentRuns_MarksPendingAndRunningInterrupted(t *testing.T) {
 	}
 
 	newRun := func(state agentRunState) int64 {
-		tk, err := CreateTask(db, session.ID, "prompt")
+		tk, err := CreateTask(db, session.ID, "prompt", nil)
 		if err != nil {
 			t.Fatalf("CreateTask() = %v, want nil", err)
 		}

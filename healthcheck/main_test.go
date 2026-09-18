@@ -331,10 +331,13 @@ func TestHandleWorkspaces_ListsPersistedWorkspaces(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"handler-test-repo", "main"} {
+	for _, want := range []string{"handler-test-repo", "main", `data-workspace-path="` + repoDir + `"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("workspaces body missing %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, `data-workspace-path="`+repoDir+`" checked`) {
+		t.Error("workspaces body has the polling checkbox pre-checked, want unchecked (default false)")
 	}
 }
 
@@ -403,6 +406,82 @@ func TestHandleAPIWorkspacesClone_SuccessAndStatus(t *testing.T) {
 	}
 	if len(jobs) != 1 || jobs[0].Repo != "cloned-via-api" || jobs[0].State != cloneStateSucceeded {
 		t.Errorf("jobs = %+v, want one succeeded job for cloned-via-api", jobs)
+	}
+}
+
+func TestHandleAPIWorkspacesPolling_MethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/polling", nil)
+	handleAPIWorkspacesPolling(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIWorkspacesPolling_UnknownWorkspace(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	form := url.Values{"workspace": {"/no/such/path"}, "enabled": {"true"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/polling", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIWorkspacesPolling(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIWorkspacesPolling_TogglesOnAndOff(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	const path = "/root/workspace/handler-polling-toggle"
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, path) })
+	if err := UpsertWorkspace(dbConn, "handler-polling-toggle", path, ""); err != nil {
+		t.Fatalf("UpsertWorkspace() = %v, want nil", err)
+	}
+
+	form := url.Values{"workspace": {path}, "enabled": {"true"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/polling", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIWorkspacesPolling(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	got, err := GetWorkspaceByPath(dbConn, path)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByPath() = %v, want nil", err)
+	}
+	if !got.GitHubIssuePollingEnabled {
+		t.Error("GitHubIssuePollingEnabled = false after enabling via the handler, want true")
+	}
+
+	form = url.Values{"workspace": {path}, "enabled": {"false"}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/polling", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIWorkspacesPolling(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	got, err = GetWorkspaceByPath(dbConn, path)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByPath() = %v, want nil", err)
+	}
+	if got.GitHubIssuePollingEnabled {
+		t.Error("GitHubIssuePollingEnabled = true after disabling via the handler, want false")
 	}
 }
 
@@ -1133,5 +1212,62 @@ func TestHandleAPIAgentsApprovalsDecide_Approve(t *testing.T) {
 	}
 	if done.ClaudeSessionID != originalSessionID {
 		t.Errorf("done.ClaudeSessionID = %q, want %q (the resumed run must reuse the original session)", done.ClaudeSessionID, originalSessionID)
+	}
+}
+
+// TestHandleAPIAgentsApprovalsDecide_Approve_CarriesGitHubIssueNumber
+// confirms a resumed run's new task copies the original task's
+// github_issue_number forward — without this, a Job-created run that pauses
+// for approval would lose track of which issue to comment on once it later
+// reaches a terminal state.
+func TestHandleAPIAgentsApprovalsDecide_Approve_CarriesGitHubIssueNumber(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	withAgentRunner(t, `printf '%s\n' '{"type":"result","subtype":"success","is_error":false}'`)
+
+	workspaceID := seedWorkspace(t, dbConn, "decide-approve-issue-number")
+	session, err := CreateAgentSession(dbConn, workspaceID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession() = %v, want nil", err)
+	}
+	issueNumber := 99
+	tk, err := CreateTask(dbConn, session.ID, "investigate issue #99", &issueNumber)
+	if err != nil {
+		t.Fatalf("CreateTask() = %v, want nil", err)
+	}
+	run, err := CreateAgentRun(dbConn, tk.ID)
+	if err != nil {
+		t.Fatalf("CreateAgentRun() = %v, want nil", err)
+	}
+
+	a, err := CreateApproval(dbConn, run.ID, "Bash", `{"command":"git push origin main"}`, "gated command: git push origin main")
+	if err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := decideRequest(a.ID, "approve")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var newRun agentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &newRun); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+
+	waitForAgentRunDone(t, dbConn, newRun.ID, 5*time.Second)
+
+	newTask, err := GetTask(dbConn, newRun.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask() = %v, want nil", err)
+	}
+	if newTask.GitHubIssueNumber == nil || *newTask.GitHubIssueNumber != 99 {
+		t.Errorf("newTask.GitHubIssueNumber = %v, want pointer to 99 (carried from the original task)", newTask.GitHubIssueNumber)
 	}
 }

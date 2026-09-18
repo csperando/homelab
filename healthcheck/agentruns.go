@@ -16,11 +16,15 @@ type agentSession struct {
 }
 
 // task is a single free-text prompt submitted within an agent session.
+// GitHubIssueNumber is only set for tasks created by the GitHub issue
+// poller (nil for manually-started tasks) — it's how the terminal-state
+// write-back (agentprocess.go) knows which issue, if any, to comment on.
 type task struct {
-	ID             int64     `json:"id"`
-	AgentSessionID int64     `json:"agent_session_id"`
-	Prompt         string    `json:"prompt"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID                int64     `json:"id"`
+	AgentSessionID    int64     `json:"agent_session_id"`
+	Prompt            string    `json:"prompt"`
+	GitHubIssueNumber *int      `json:"github_issue_number,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type agentRunState string
@@ -64,19 +68,45 @@ func CreateAgentSession(db *sql.DB, workspaceID int64) (agentSession, error) {
 	return s, nil
 }
 
-func CreateTask(db *sql.DB, agentSessionID int64, prompt string) (task, error) {
+func CreateTask(db *sql.DB, agentSessionID int64, prompt string, githubIssueNumber *int) (task, error) {
 	if db == nil {
 		return task{}, fmt.Errorf("postgres unavailable")
 	}
 	var t task
+	var issueNumber sql.NullInt64
 	err := db.QueryRow(`
-		INSERT INTO tasks (agent_session_id, prompt) VALUES ($1, $2)
-		RETURNING id, agent_session_id, prompt, created_at
-	`, agentSessionID, prompt).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &t.CreatedAt)
+		INSERT INTO tasks (agent_session_id, prompt, github_issue_number) VALUES ($1, $2, $3)
+		RETURNING id, agent_session_id, prompt, github_issue_number, created_at
+	`, agentSessionID, prompt, githubIssueNumber).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &issueNumber, &t.CreatedAt)
 	if err != nil {
 		return task{}, fmt.Errorf("creating task: %w", err)
 	}
+	if issueNumber.Valid {
+		n := int(issueNumber.Int64)
+		t.GitHubIssueNumber = &n
+	}
 	return t, nil
+}
+
+// githubIssueHasTask reports whether a task already exists for the given
+// workspace/issue number pair — the poller's dedup check, joined through
+// agent_sessions since tasks are keyed by session, not workspace, directly.
+func githubIssueHasTask(db *sql.DB, workspaceID int64, issueNumber int) (bool, error) {
+	if db == nil {
+		return false, fmt.Errorf("postgres unavailable")
+	}
+	var exists bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM tasks
+			JOIN agent_sessions ON agent_sessions.id = tasks.agent_session_id
+			WHERE agent_sessions.workspace_id = $1 AND tasks.github_issue_number = $2
+		)
+	`, workspaceID, issueNumber).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("checking existing task for workspace %d issue #%d: %w", workspaceID, issueNumber, err)
+	}
+	return exists, nil
 }
 
 // GetAgentSession looks up a single agent session by ID — the approve/deny
@@ -102,11 +132,16 @@ func GetTask(db *sql.DB, taskID int64) (task, error) {
 		return task{}, fmt.Errorf("postgres unavailable")
 	}
 	var t task
+	var issueNumber sql.NullInt64
 	err := db.QueryRow(`
-		SELECT id, agent_session_id, prompt, created_at FROM tasks WHERE id = $1
-	`, taskID).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &t.CreatedAt)
+		SELECT id, agent_session_id, prompt, github_issue_number, created_at FROM tasks WHERE id = $1
+	`, taskID).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &issueNumber, &t.CreatedAt)
 	if err != nil {
 		return task{}, fmt.Errorf("getting task %d: %w", taskID, err)
+	}
+	if issueNumber.Valid {
+		n := int(issueNumber.Int64)
+		t.GitHubIssueNumber = &n
 	}
 	return t, nil
 }

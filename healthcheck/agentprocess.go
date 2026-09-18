@@ -95,6 +95,16 @@ func workspaceHasLiveRun(workspaceID int64) (int64, bool) {
 	return 0, false
 }
 
+// workspaceRunInProgress is the in-flight check shared by the manual "start
+// an agent" handler and the automated GitHub issue poller — neither may
+// start a new run against a workspace that already has one live, since two
+// `claude` subprocesses running concurrently against the same working
+// directory would corrupt each other's changes.
+func workspaceRunInProgress(workspaceID int64) bool {
+	_, inProgress := workspaceHasLiveRun(workspaceID)
+	return inProgress
+}
+
 // liveRunBySessionID maps a claude session_id (as reported in a PreToolUse
 // hook callback's payload) back to our internal run ID — a linear scan,
 // same scale justification as workspaceHasLiveRun. Returns false if the
@@ -313,12 +323,15 @@ func buildAgentCommand(workspacePath, prompt, sessionID string, resume bool) *ex
 
 // claudeJSONLine is the minimal subset of a --output-format stream-json
 // line this package reads: the final line is type "result", whose is_error
-// field is the authoritative success/failure signal. session_id isn't read
-// here — runAgent generates and passes it upfront (see buildAgentArgs), so
-// there's no need to parse it back out of the stream.
+// field is the authoritative success/failure signal and whose result field
+// is the human-readable summary text (used by the GitHub issue write-back,
+// see extractResultText). session_id isn't read here — runAgent generates
+// and passes it upfront (see buildAgentArgs), so there's no need to parse it
+// back out of the stream.
 type claudeJSONLine struct {
 	Type    string `json:"type"`
 	IsError bool   `json:"is_error"`
+	Result  string `json:"result"`
 }
 
 // startAgentRun launches a claude subprocess for run in the background,
@@ -414,6 +427,81 @@ func runAgent(runID, workspaceID int64, workspacePath, prompt, resumeSessionID s
 	}
 
 	finishAgentRun(runID, state, transcript, errMsg)
+	writeBackGitHubIssueComment(runID, state, transcript, errMsg)
+}
+
+// extractResultText scans a captured transcript (newline-separated
+// --output-format stream-json lines) for the last type:"result" line's
+// result text — "" if none is found (e.g. the run never got that far).
+func extractResultText(transcript string) string {
+	var result string
+	for _, line := range strings.Split(transcript, "\n") {
+		var msg claudeJSONLine
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg.Type == "result" {
+			result = msg.Result
+		}
+	}
+	return result
+}
+
+// writeBackGitHubIssueComment posts a run's final result as a comment on its
+// originating GitHub issue, if the run's task has one — the Phase 6 write-
+// back. awaiting_approval is deliberately excluded: it isn't a genuinely
+// terminal outcome yet (see isTerminalAgentRunState's own doc comment for
+// why it's still treated as terminal for finished_at purposes despite that).
+// Best-effort throughout: any failure here is only logged, never affects
+// the run's own already-persisted outcome. Explicitly out of scope: a run
+// ReconcileAgentRuns marks interrupted after a restart never reaches this
+// function at all (nothing calls it for that path) — a deliberate, disclosed
+// trim, not an oversight.
+func writeBackGitHubIssueComment(runID int64, state agentRunState, transcript, errMsg string) {
+	if state == agentRunAwaitingApproval || githubToken == "" {
+		return
+	}
+
+	run, err := GetAgentRun(db, runID)
+	if err != nil {
+		log.Printf("agent run %d: github write-back: getting run: %v", runID, err)
+		return
+	}
+	tk, err := GetTask(db, run.TaskID)
+	if err != nil {
+		log.Printf("agent run %d: github write-back: getting task: %v", runID, err)
+		return
+	}
+	if tk.GitHubIssueNumber == nil {
+		return
+	}
+	session, err := GetAgentSession(db, tk.AgentSessionID)
+	if err != nil {
+		log.Printf("agent run %d: github write-back: getting agent session: %v", runID, err)
+		return
+	}
+	ws, err := GetWorkspaceByID(db, session.WorkspaceID)
+	if err != nil {
+		log.Printf("agent run %d: github write-back: getting workspace: %v", runID, err)
+		return
+	}
+	owner, repo, err := githubRemoteOwnerRepo(ws.Path)
+	if err != nil {
+		log.Printf("agent run %d: github write-back: resolving GitHub remote: %v", runID, err)
+		return
+	}
+
+	body := extractResultText(transcript)
+	if body == "" {
+		body = errMsg
+	}
+	if body == "" {
+		body = fmt.Sprintf("Agent run finished with state %q but no result text was captured.", state)
+	}
+
+	if err := postGitHubIssueComment(githubToken, owner, repo, *tk.GitHubIssueNumber, body); err != nil {
+		log.Printf("agent run %d: github write-back: posting comment on issue #%d: %v", runID, *tk.GitHubIssueNumber, err)
+	}
 }
 
 // finishAgentRun persists a run's final outcome, but only if it isn't

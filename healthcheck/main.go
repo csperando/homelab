@@ -262,7 +262,7 @@ func handleAPIAgentsStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workspace directory no longer exists", http.StatusBadRequest)
 		return
 	}
-	if _, inProgress := workspaceHasLiveRun(ws.ID); inProgress {
+	if workspaceRunInProgress(ws.ID) {
 		http.Error(w, "a run is already in progress for this workspace", http.StatusConflict)
 		return
 	}
@@ -272,7 +272,7 @@ func handleAPIAgentsStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tk, err := CreateTask(db, session.ID, prompt)
+	tk, err := CreateTask(db, session.ID, prompt, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -545,7 +545,10 @@ func handleAPIAgentsApprovalsDecide(w http.ResponseWriter, r *http.Request) {
 
 	prompt := fmt.Sprintf("The following action has been approved by the operator: %s %s. Proceed with it now.", appr.ToolName, appr.ToolInput)
 
-	newTask, err := CreateTask(db, session.ID, prompt)
+	// Carry the original task's GitHub issue number (if any) forward, or a
+	// run that paused for approval, got approved, and later reaches a
+	// terminal state would lose track of which issue to comment on.
+	newTask, err := CreateTask(db, session.ID, prompt, originalTask.GitHubIssueNumber)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -643,6 +646,34 @@ func handleAPIWorkspacesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAPIWorkspacesPolling toggles a workspace's opt-in for automated
+// GitHub issue polling — the Workspace tab's checkbox POSTs here on every
+// change, no separate save step.
+func handleAPIWorkspacesPolling(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	ws, err := GetWorkspaceByPath(db, r.FormValue("workspace"))
+	if err != nil {
+		http.Error(w, "unknown workspace", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") == "true"
+	if err := SetWorkspaceGitHubIssuePolling(db, ws.ID, enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 // isSafeRepoName reports whether name is safe to use as a single path
 // segment under workspaceDir (e.g. via filepath.Join(workspaceDir, name))
 // or in an exec.Command argument — rejecting anything empty, containing a
@@ -698,12 +729,20 @@ func main() {
 		}
 	}
 
+	// The GitHub issue poller degrades off (never starts, no error spam)
+	// rather than crashing when either dependency is unavailable, mirroring
+	// every other GitHub-gated feature in this package.
+	if db != nil && githubToken != "" {
+		startGitHubIssuePoller(db)
+	}
+
 	http.HandleFunc("/healthz", handleHealthz)
 	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
 	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
 	http.Handle("/workspaces", withAuth(adminUser, adminPass, http.HandlerFunc(handleWorkspaces)))
 	http.Handle("/api/workspaces/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesClone)))
 	http.Handle("/api/workspaces/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesStatus)))
+	http.Handle("/api/workspaces/polling", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesPolling)))
 	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
 	http.Handle("/api/agents/start", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStart)))
 	http.Handle("/api/agents/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStatus)))

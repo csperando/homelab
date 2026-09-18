@@ -13,12 +13,13 @@ import (
 // EnvConfig is a placeholder for future per-workspace config (raw JSON
 // text); nothing writes anything but the "{}" column default yet.
 type workspace struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Path      string    `json:"path"`
-	RepoURL   string    `json:"repo_url,omitempty"`
-	EnvConfig string    `json:"env_config"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                        int64     `json:"id"`
+	Name                      string    `json:"name"`
+	Path                      string    `json:"path"`
+	RepoURL                   string    `json:"repo_url,omitempty"`
+	EnvConfig                 string    `json:"env_config"`
+	GitHubIssuePollingEnabled bool      `json:"github_issue_polling_enabled"`
+	CreatedAt                 time.Time `json:"created_at"`
 }
 
 // UpsertWorkspace records (or updates) the workspace at path, keyed by its
@@ -47,7 +48,7 @@ func ListWorkspaces(db *sql.DB) ([]workspace, error) {
 	if db == nil {
 		return nil, fmt.Errorf("postgres unavailable")
 	}
-	rows, err := db.Query(`SELECT id, name, path, repo_url, env_config::text, created_at FROM workspaces ORDER BY name`)
+	rows, err := db.Query(`SELECT id, name, path, repo_url, env_config::text, github_issue_polling_enabled, created_at FROM workspaces ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing workspaces: %w", err)
 	}
@@ -56,7 +57,7 @@ func ListWorkspaces(db *sql.DB) ([]workspace, error) {
 	var workspaces []workspace
 	for rows.Next() {
 		var w workspace
-		if err := rows.Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.GitHubIssuePollingEnabled, &w.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning workspace row: %w", err)
 		}
 		workspaces = append(workspaces, w)
@@ -74,9 +75,9 @@ func GetWorkspaceByPath(db *sql.DB, path string) (workspace, error) {
 	}
 	var w workspace
 	err := db.QueryRow(`
-		SELECT id, name, path, repo_url, env_config::text, created_at
+		SELECT id, name, path, repo_url, env_config::text, github_issue_polling_enabled, created_at
 		FROM workspaces WHERE path = $1
-	`, path).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.CreatedAt)
+	`, path).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.GitHubIssuePollingEnabled, &w.CreatedAt)
 	if err != nil {
 		return workspace{}, fmt.Errorf("getting workspace %s: %w", path, err)
 	}
@@ -92,25 +93,49 @@ func GetWorkspaceByID(db *sql.DB, workspaceID int64) (workspace, error) {
 	}
 	var w workspace
 	err := db.QueryRow(`
-		SELECT id, name, path, repo_url, env_config::text, created_at
+		SELECT id, name, path, repo_url, env_config::text, github_issue_polling_enabled, created_at
 		FROM workspaces WHERE id = $1
-	`, workspaceID).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.CreatedAt)
+	`, workspaceID).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.GitHubIssuePollingEnabled, &w.CreatedAt)
 	if err != nil {
 		return workspace{}, fmt.Errorf("getting workspace %d: %w", workspaceID, err)
 	}
 	return w, nil
 }
 
+// SetWorkspaceGitHubIssuePolling toggles a workspace's opt-in for automated
+// GitHub issue polling (Phase 6's poller only considers workspaces with this
+// set). db may be nil (Postgres unreachable) — callers surface that as an
+// error rather than silently no-opping.
+func SetWorkspaceGitHubIssuePolling(db *sql.DB, workspaceID int64, enabled bool) error {
+	if db == nil {
+		return fmt.Errorf("postgres unavailable")
+	}
+	res, err := db.Exec(`UPDATE workspaces SET github_issue_polling_enabled = $1 WHERE id = $2`, enabled, workspaceID)
+	if err != nil {
+		return fmt.Errorf("setting github_issue_polling_enabled for workspace %d: %w", workspaceID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected for workspace %d: %w", workspaceID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no workspace with id %d", workspaceID)
+	}
+	return nil
+}
+
 // workspaceRow is the template-facing merge of a persisted workspace with
 // its live git status — branch/dirty are never persisted (see workspace's
 // doc comment), so this join happens at request time, by path.
 type workspaceRow struct {
-	Name      string
-	Path      string
-	RepoURL   string
-	EnvConfig string
-	Branch    string
-	Dirty     bool
+	ID                        int64
+	Name                      string
+	Path                      string
+	RepoURL                   string
+	EnvConfig                 string
+	GitHubIssuePollingEnabled bool
+	Branch                    string
+	Dirty                     bool
 }
 
 // mergeWorkspaceRows joins persisted workspaces with scanWorkspaceRepos'
@@ -125,7 +150,7 @@ func mergeWorkspaceRows(workspaces []workspace, repos []repoStatus) []workspaceR
 
 	rows := make([]workspaceRow, 0, len(workspaces))
 	for _, w := range workspaces {
-		row := workspaceRow{Name: w.Name, Path: w.Path, RepoURL: w.RepoURL, EnvConfig: w.EnvConfig}
+		row := workspaceRow{ID: w.ID, Name: w.Name, Path: w.Path, RepoURL: w.RepoURL, EnvConfig: w.EnvConfig, GitHubIssuePollingEnabled: w.GitHubIssuePollingEnabled}
 		if s, ok := statusByPath[w.Path]; ok {
 			row.Branch = s.Branch
 			row.Dirty = s.Dirty
