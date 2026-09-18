@@ -64,6 +64,25 @@ func ListWorkspaces(db *sql.DB) ([]workspace, error) {
 	return workspaces, rows.Err()
 }
 
+// GetWorkspaceByPath looks up a single workspace by its unique path column
+// — the validation a new Agent Run must pass before spawning against it
+// (see handleAPIAgentsStart), so it never spawns against an unvalidated
+// path.
+func GetWorkspaceByPath(db *sql.DB, path string) (workspace, error) {
+	if db == nil {
+		return workspace{}, fmt.Errorf("postgres unavailable")
+	}
+	var w workspace
+	err := db.QueryRow(`
+		SELECT id, name, path, repo_url, env_config::text, created_at
+		FROM workspaces WHERE path = $1
+	`, path).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.CreatedAt)
+	if err != nil {
+		return workspace{}, fmt.Errorf("getting workspace %s: %w", path, err)
+	}
+	return w, nil
+}
+
 // workspaceRow is the template-facing merge of a persisted workspace with
 // its live git status — branch/dirty are never persisted (see workspace's
 // doc comment), so this join happens at request time, by path.

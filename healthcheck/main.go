@@ -43,12 +43,6 @@ type dashboardView struct {
 	Docker       dockerStatus
 }
 
-// pageView is the minimal template data for placeholder pages that don't yet
-// have any content of their own beyond the shared head/nav.
-type pageView struct {
-	Active string
-}
-
 // workspacesView is the template data for the "workspaces" tab (formerly
 // "repos"): the GitHub repo list (or a disabled/error reason if it couldn't
 // be fetched) plus any in-flight or completed clone jobs, keyed by repo
@@ -64,6 +58,21 @@ type workspacesView struct {
 	WorkspacesEnabled bool
 	WorkspacesReason  string
 	Workspaces        []workspaceRow
+}
+
+// agentsView is the template data for the "agents" tab: the workspace list
+// (for the picker) and the persisted run history (most recent first,
+// including any still in-flight — so a page reload doesn't lose track of a
+// running task), each degrading independently with its own Reason since
+// they're both just different views of the same Postgres availability.
+type agentsView struct {
+	Active            string
+	WorkspacesEnabled bool
+	WorkspacesReason  string
+	Workspaces        []workspace
+	RunsEnabled       bool
+	RunsReason        string
+	Runs              []agentRun
 }
 
 // logsView is the template data for the "logs" tab.
@@ -182,11 +191,156 @@ func handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAgents renders the agents tab: a workspace picker to start a new
+// run, plus the run history (including anything still in-flight) so the
+// page reflects reality on load rather than starting blank.
 func handleAgents(w http.ResponseWriter, r *http.Request) {
-	if err := pageTmpl.ExecuteTemplate(w, "agents.html", pageView{Active: "agents"}); err != nil {
+	view := agentsView{Active: "agents"}
+
+	if workspaces, err := ListWorkspaces(db); err != nil {
+		view.WorkspacesReason = err.Error()
+	} else {
+		view.WorkspacesEnabled = true
+		view.Workspaces = workspaces
+	}
+
+	if runs, err := ListAgentRuns(db); err != nil {
+		view.RunsReason = err.Error()
+	} else {
+		view.RunsEnabled = true
+		view.Runs = runs
+	}
+
+	if err := pageTmpl.ExecuteTemplate(w, "agents.html", view); err != nil {
 		log.Printf("failed to render agents page: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+// handleAPIAgentsStart triggers a background agent run against the given
+// workspace's directory, returning the created run as JSON. POST-only,
+// since it has a side effect.
+func handleAPIAgentsStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	workspacePath := r.FormValue("workspace")
+	prompt := r.FormValue("prompt")
+	if prompt == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+
+	ws, err := GetWorkspaceByPath(db, workspacePath)
+	if err != nil {
+		http.Error(w, "unknown workspace", http.StatusBadRequest)
+		return
+	}
+	// A workspace row can outlive its directory — nothing currently deletes
+	// a row when the clone is removed by hand — so never spawn against a
+	// path that no longer exists.
+	if _, err := os.Stat(ws.Path); err != nil {
+		http.Error(w, "workspace directory no longer exists", http.StatusBadRequest)
+		return
+	}
+	if _, inProgress := workspaceHasLiveRun(ws.ID); inProgress {
+		http.Error(w, "a run is already in progress for this workspace", http.StatusConflict)
+		return
+	}
+
+	session, err := CreateAgentSession(db, ws.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tk, err := CreateTask(db, session.ID, prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	run, err := CreateAgentRun(db, tk.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	startAgentRun(run.ID, ws.ID, ws.Path, prompt)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(run); err != nil {
+		log.Printf("failed to encode agent run response: %v", err)
+	}
+}
+
+// handleAPIAgentsStatus reports one agent run's current state/transcript,
+// merging the in-memory live transcript (if the run is still being
+// tracked) over the persisted Postgres row otherwise — for the Agents tab
+// to poll while a run is in progress.
+func handleAPIAgentsStatus(w http.ResponseWriter, r *http.Request) {
+	runID, err := strconv.ParseInt(r.URL.Query().Get("run"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid or missing run query param", http.StatusBadRequest)
+		return
+	}
+
+	run, err := GetAgentRun(db, runID)
+	if err != nil {
+		http.Error(w, "unknown run", http.StatusNotFound)
+		return
+	}
+
+	// A run still tracked in-memory is, by definition, running — this also
+	// covers the brief window between registerLiveRun and the DB write that
+	// follows it in runAgent, where the persisted row might still say
+	// "pending".
+	if transcript, ok := liveRunTranscript(runID); ok {
+		run.State = agentRunRunning
+		run.Transcript = transcript
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(run); err != nil {
+		log.Printf("failed to encode agent status response: %v", err)
+	}
+}
+
+// handleAPIAgentsStop signals a running agent run's process to stop
+// (SIGTERM, escalating to SIGKILL after a grace period if it doesn't exit
+// on its own) and marks it stop-requested so its own completion path
+// records "stopped" rather than "failed". POST-only, since it has a side
+// effect. Responds immediately rather than waiting out the grace period.
+func handleAPIAgentsStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	runID, err := strconv.ParseInt(r.FormValue("run"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid or missing run field", http.StatusBadRequest)
+		return
+	}
+
+	if !requestStop(runID) {
+		http.Error(w, "run is not currently in progress", http.StatusNotFound)
+		return
+	}
+	go escalateStopAfterGracePeriod(runID)
+
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // handleLogs renders the logs tab, server-rendering the initial tail so the
@@ -314,6 +468,9 @@ func main() {
 		if err := backfillWorkspaces(db); err != nil {
 			log.Printf("backfilling workspaces: %v", err)
 		}
+		if err := ReconcileAgentRuns(db); err != nil {
+			log.Printf("reconciling agent runs: %v", err)
+		}
 	}
 
 	http.HandleFunc("/healthz", handleHealthz)
@@ -323,6 +480,9 @@ func main() {
 	http.Handle("/api/workspaces/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesClone)))
 	http.Handle("/api/workspaces/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesStatus)))
 	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
+	http.Handle("/api/agents/start", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStart)))
+	http.Handle("/api/agents/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStatus)))
+	http.Handle("/api/agents/stop", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStop)))
 	http.Handle("/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleLogs)))
 	http.Handle("/api/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPILogs)))
 	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))

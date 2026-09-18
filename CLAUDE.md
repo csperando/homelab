@@ -135,9 +135,12 @@ A small embedded Go HTTP service, split by concern:
   Postgres), `/api/status` (full JSON status), `/` (HTML dashboard, template embedded via
   `go:embed`), `/workspaces` (the workspaces tab, formerly "repos" — see below),
   `/api/workspaces/clone` and `/api/workspaces/status` (workspaces tab backing endpoints,
-  see below), and `/files/` (a file server restricted to serving only paths that pass
-  through a directory literally named `coverage` — see `isCoveragePath`/`coverageOnly` —
-  not general workspace file access).
+  see below), `/agents` (the agents tab: start/observe/stop a headless `claude` run
+  against a workspace — see `agentruns.go`/`agentprocess.go` below), `/api/agents/start`,
+  `/api/agents/status` (per-run, `?run=<id>`), and `/api/agents/stop`, and `/files/` (a
+  file server restricted to serving only paths that pass through a directory literally
+  named `coverage` — see `isCoveragePath`/`coverageOnly` — not general workspace file
+  access).
 - `status.go` — gathers the status payload: tool versions, workspace disk usage, memory,
   load average, and a one-level-deep scan of `/root/workspace` for git repos (branch,
   dirty state).
@@ -171,10 +174,35 @@ A small embedded Go HTTP service, split by concern:
   server starts serving. A migration failure is fatal (`log.Fatalf`) — distinct from
   Postgres simply being unreachable, which degrades instead.
 - `workspaces.go` — the `workspaces` table's repository layer (`UpsertWorkspace`,
-  `ListWorkspaces`) plus `backfillWorkspaces` (fills in any repo already on disk under
-  `workspaceDir` that predates this feature) and `mergeWorkspaceRows` (joins persisted
-  workspaces with `scanWorkspaceRepos`' live branch/dirty state by path at request time —
-  branch/dirty are intentionally never persisted, so they can't go stale).
+  `ListWorkspaces`, `GetWorkspaceByPath`) plus `backfillWorkspaces` (fills in any repo
+  already on disk under `workspaceDir` that predates this feature) and
+  `mergeWorkspaceRows` (joins persisted workspaces with `scanWorkspaceRepos`' live
+  branch/dirty state by path at request time — branch/dirty are intentionally never
+  persisted, so they can't go stale).
+- `agentruns.go` — the `agent_sessions`/`tasks`/`agent_runs` repository layer
+  (`CreateAgentSession`, `CreateTask`, `CreateAgentRun`, `SetAgentRunClaudeSessionID`,
+  `UpdateAgentRunState`, `GetAgentRun`, `ListAgentRuns`), plus `ReconcileAgentRuns` (run
+  once at startup, alongside `backfillWorkspaces`: marks any run still `pending`/
+  `running` as `interrupted`, since the in-memory live-run store below is always empty on
+  a fresh process start — a row in one of those states means a previous `healthcheck`
+  process was killed/restarted mid-run). An `agent_runs.transcript` is only ever written
+  once, when the run finishes — never incrementally (see `agentprocess.go`).
+- `agentprocess.go` — the headless `claude` invocation and its in-memory live-run store
+  (`liveRuns`, mirroring `clone.go`'s `cloneJobs` map but keyed by run ID, with a
+  `workspaceHasLiveRun` linear-scan helper for the one place that needs to search by
+  workspace instead — fine at this scale). `runAgent` spawns `claude --print
+  --output-format stream-json --permission-prompts none --restricted --tools
+  Read,Write,Edit,Bash --max-budget-usd <cap>` (never `--dangerously-skip-permissions` —
+  that flag is scoped by Anthropic to network-isolated sandboxes, which this container is
+  not) via `exec.Command` (`agentRunner` is a swappable package var, mirroring
+  `cloneRunner`, so tests exercise the real JSONL-parsing logic against a cheap `sh -c`
+  fake instead of the real, paid `claude` CLI), streams stdout line-by-line into the
+  live-run store, and persists the final outcome via `finishAgentRun` — which checks the
+  run isn't already terminal before writing, guarding against a race with the stop
+  action. `requestStop`/`escalateStopAfterGracePeriod` implement stop: `SIGTERM`,
+  escalating to `SIGKILL` after `stopGracePeriod` if the process hasn't exited; the
+  stop-requested flag is only set once the signal is confirmed delivered, so a run that
+  happens to finish naturally at the same moment is never mis-reported as stopped.
 
 ### Claude Code skills (`.claude/skills/`)
 

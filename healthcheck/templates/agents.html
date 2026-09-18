@@ -9,7 +9,150 @@
 
     {{template "nav" .}}
 
-    <p class="text-hl-muted">agents &mdash; coming soon</p>
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">start an agent</h2>
+      <div class="mt-2">
+        {{if .WorkspacesEnabled}}
+          {{if .Workspaces}}
+          <form id="agent-start-form" class="space-y-2">
+            <select id="agent-workspace" name="workspace"
+              class="w-full sm:w-80 bg-transparent border border-hl-border rounded px-2 py-1 text-sm text-hl-text focus:outline-none focus:border-sky-300">
+              {{range .Workspaces}}
+              <option value="{{.Path}}">{{.Name}}</option>
+              {{end}}
+            </select>
+            <textarea id="agent-prompt" name="prompt" rows="3" placeholder="what should the agent do?"
+              class="w-full bg-transparent border border-hl-border rounded px-2 py-1 text-sm text-hl-text placeholder-hl-muted focus:outline-none focus:border-sky-300"></textarea>
+            <button type="submit" class="text-hl-accent underline">start</button>
+            <p id="agent-start-error" class="hidden text-hl-warn text-xs"></p>
+          </form>
+          {{else}}
+          <p class="text-hl-muted">no workspaces yet &mdash; clone a repo on the workspace tab first</p>
+          {{end}}
+        {{else}}
+        <p class="text-hl-muted">{{.WorkspacesReason}}</p>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="mt-8">
+      <h2 class="text-sky-300 text-sm font-semibold">runs</h2>
+      <div id="agent-runs" class="mt-2 space-y-4">
+        {{if .RunsEnabled}}
+          {{if .Runs}}
+            {{range .Runs}}
+            <div class="border border-hl-border rounded p-3" data-run-id="{{.ID}}">
+              <div class="flex justify-between items-center">
+                <span class="text-xs text-hl-muted">run {{.ID}}</span>
+                <span class="agent-run-status text-xs">{{.State}}</span>
+              </div>
+              <pre class="agent-run-transcript mt-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{{.Transcript}}</pre>
+              <button type="button" class="agent-run-stop text-hl-warn underline text-xs mt-1{{if not (or (eq .State "pending") (eq .State "running"))}} hidden{{end}}">stop</button>
+            </div>
+            {{end}}
+          {{else}}
+          <p class="text-hl-muted">no runs yet</p>
+          {{end}}
+        {{else}}
+        <p class="text-hl-muted">{{.RunsReason}}</p>
+        {{end}}
+      </div>
+    </div>
   </div>
+  <script>
+    (function () {
+      function isActive(state) {
+        return state === 'pending' || state === 'running';
+      }
+
+      function renderRun(container, run) {
+        var status = container.querySelector('.agent-run-status');
+        var transcript = container.querySelector('.agent-run-transcript');
+        var stopBtn = container.querySelector('.agent-run-stop');
+        if (status) status.textContent = run.state;
+        if (transcript) {
+          transcript.textContent = run.transcript || '';
+          transcript.scrollTop = transcript.scrollHeight;
+        }
+        if (stopBtn) stopBtn.classList.toggle('hidden', !isActive(run.state));
+      }
+
+      function poll(runID, container) {
+        fetch('/api/agents/status?run=' + encodeURIComponent(runID))
+          .then(function (r) { return r.json(); })
+          .then(function (run) {
+            renderRun(container, run);
+            if (isActive(run.state)) {
+              setTimeout(function () { poll(runID, container); }, 2000);
+            }
+          })
+          .catch(function () {});
+      }
+
+      function attachStop(container, runID) {
+        var stopBtn = container.querySelector('.agent-run-stop');
+        if (!stopBtn) return;
+        stopBtn.addEventListener('click', function () {
+          fetch('/api/agents/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'run=' + encodeURIComponent(runID)
+          }).catch(function () {});
+        });
+      }
+
+      // Resume polling for any run that's already in-flight on page load.
+      document.querySelectorAll('#agent-runs [data-run-id]').forEach(function (container) {
+        var runID = container.getAttribute('data-run-id');
+        attachStop(container, runID);
+        var status = container.querySelector('.agent-run-status');
+        if (status && isActive(status.textContent.trim())) {
+          poll(runID, container);
+        }
+      });
+
+      var form = document.getElementById('agent-start-form');
+      if (form) {
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var errorEl = document.getElementById('agent-start-error');
+          if (errorEl) errorEl.classList.add('hidden');
+          var data = new FormData(form);
+          fetch('/api/agents/start', { method: 'POST', body: new URLSearchParams(data) })
+            .then(function (r) {
+              if (!r.ok) {
+                return r.text().then(function (msg) { throw new Error(msg); });
+              }
+              return r.json();
+            })
+            .then(function (run) {
+              var runsList = document.getElementById('agent-runs');
+              var empty = runsList.querySelector('p');
+              if (empty) empty.remove();
+              var container = document.createElement('div');
+              container.className = 'border border-hl-border rounded p-3';
+              container.setAttribute('data-run-id', run.id);
+              container.innerHTML =
+                '<div class="flex justify-between items-center">' +
+                '<span class="text-xs text-hl-muted">run ' + run.id + '</span>' +
+                '<span class="agent-run-status text-xs">' + run.state + '</span>' +
+                '</div>' +
+                '<pre class="agent-run-transcript mt-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto"></pre>' +
+                '<button type="button" class="agent-run-stop text-hl-warn underline text-xs mt-1">stop</button>';
+              runsList.insertBefore(container, runsList.firstChild);
+              attachStop(container, run.id);
+              poll(run.id, container);
+              document.getElementById('agent-prompt').value = '';
+            })
+            .catch(function (err) {
+              if (errorEl) {
+                errorEl.textContent = err.message || 'failed to start run';
+                errorEl.classList.remove('hidden');
+              }
+            });
+        });
+      }
+    })();
+  </script>
 </body>
 </html>

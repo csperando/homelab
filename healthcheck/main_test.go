@@ -1,12 +1,15 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -403,7 +406,9 @@ func TestHandleAPIWorkspacesClone_SuccessAndStatus(t *testing.T) {
 	}
 }
 
-func TestHandleAgents(t *testing.T) {
+func TestHandleAgents_PostgresUnreachable(t *testing.T) {
+	withDB(t, nil)
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
 	handleAgents(rec, req)
@@ -412,9 +417,353 @@ func TestHandleAgents(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<html", "agents", "coming soon"} {
+	for _, want := range []string{"<html", "agents"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("agents body missing %q", want)
 		}
+	}
+	if strings.Count(body, "postgres unavailable") < 2 {
+		t.Errorf("agents body wants two independent \"postgres unavailable\" reasons (workspaces + runs), got: %s", body)
+	}
+}
+
+func TestHandleAgents_ListsWorkspacesAndRuns(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	ws := t.TempDir()
+	if err := UpsertWorkspace(dbConn, "agents-page-workspace", ws, ""); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, ws) })
+
+	runID := seedAgentRun(t, dbConn, "agents-page-run")
+	if err := UpdateAgentRunState(dbConn, runID, agentRunSucceeded, `{"type":"result"}`, ""); err != nil {
+		t.Fatalf("UpdateAgentRunState: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	handleAgents(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"agents-page-workspace", "run " + strconv.FormatInt(runID, 10), "succeeded"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agents body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// waitForAgentRunDone polls GetAgentRun until it reaches a terminal state
+// or timeout elapses, for tests that need a background agent run to finish.
+func waitForAgentRunDone(t *testing.T, db *sql.DB, runID int64, timeout time.Duration) agentRun {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		run, err := GetAgentRun(db, runID)
+		if err == nil && isTerminalAgentRunState(run.State) {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("agent run %d did not finish within %s", runID, timeout)
+	return agentRun{}
+}
+
+func TestHandleAPIAgentsStart_MethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/start", nil)
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIAgentsStart_MissingPrompt(t *testing.T) {
+	form := url.Values{"workspace": {"/root/workspace/whatever"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsStart_UnknownWorkspace(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	form := url.Values{"workspace": {"/no/such/workspace"}, "prompt": {"hi"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsStart_DirectoryMissing(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	// A path that's a valid workspace row but doesn't exist on disk.
+	path := filepath.Join(t.TempDir(), "does-not-exist-on-disk")
+	if err := UpsertWorkspace(dbConn, "gone", path, ""); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, path) })
+
+	form := url.Values{"workspace": {path}, "prompt": {"hi"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsStart_AlreadyInProgress(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	ws := t.TempDir()
+	if err := UpsertWorkspace(dbConn, "busy", ws, ""); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, ws) })
+	seeded, err := GetWorkspaceByPath(dbConn, ws)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByPath: %v", err)
+	}
+
+	cmd := exec.Command("sleep", "0.2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting fake in-progress process: %v", err)
+	}
+	defer cmd.Wait()
+	registerLiveRun(1, seeded.ID, cmd)
+
+	form := url.Values{"workspace": {ws}, "prompt": {"hi"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestHandleAPIAgentsStart_Success(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	withAgentRunner(t, `printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"sess-xyz"}'`)
+
+	ws := t.TempDir()
+	if err := UpsertWorkspace(dbConn, "start-success", ws, ""); err != nil {
+		t.Fatalf("UpsertWorkspace: %v", err)
+	}
+	t.Cleanup(func() { dbConn.Exec(`DELETE FROM workspaces WHERE path = $1`, ws) })
+
+	form := url.Values{"workspace": {ws}, "prompt": {"say hi"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStart(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var run agentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if run.State != agentRunPending {
+		t.Errorf("run.State = %q, want %q", run.State, agentRunPending)
+	}
+
+	done := waitForAgentRunDone(t, dbConn, run.ID, 5*time.Second)
+	if done.State != agentRunSucceeded {
+		t.Errorf("done.State = %q, want %q (error: %s)", done.State, agentRunSucceeded, done.Error)
+	}
+}
+
+func TestHandleAPIAgentsStatus_MissingRunParam(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/status", nil)
+	handleAPIAgentsStatus(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsStatus_UnknownRun(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/status?run=999999999", nil)
+	handleAPIAgentsStatus(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleAPIAgentsStatus_PersistedOnly(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "agent-status-persisted")
+
+	if err := UpdateAgentRunState(dbConn, runID, agentRunSucceeded, `{"type":"result"}`, ""); err != nil {
+		t.Fatalf("UpdateAgentRunState: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/status?run="+strconv.FormatInt(runID, 10), nil)
+	handleAPIAgentsStatus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	var run agentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if run.State != agentRunSucceeded {
+		t.Errorf("run.State = %q, want %q", run.State, agentRunSucceeded)
+	}
+	if run.Transcript != `{"type":"result"}` {
+		t.Errorf("run.Transcript = %q, want the persisted transcript", run.Transcript)
+	}
+}
+
+func TestHandleAPIAgentsStatus_LiveOverridesPersisted(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "agent-status-live")
+
+	// Row still says "pending" in Postgres (the narrow race window
+	// documented on handleAPIAgentsStatus), but it's tracked live.
+	cmd := exec.Command("sleep", "0.2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting fake process: %v", err)
+	}
+	defer cmd.Wait()
+	registerLiveRun(runID, 1, cmd)
+	appendLiveRunLine(runID, `{"type":"system"}`)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/status?run="+strconv.FormatInt(runID, 10), nil)
+	handleAPIAgentsStatus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	var run agentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if run.State != agentRunRunning {
+		t.Errorf("run.State = %q, want %q (live-tracked overrides the persisted \"pending\")", run.State, agentRunRunning)
+	}
+	if run.Transcript != `{"type":"system"}` {
+		t.Errorf("run.Transcript = %q, want the live buffered transcript", run.Transcript)
+	}
+}
+
+func TestHandleAPIAgentsStop_MethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/stop", nil)
+	handleAPIAgentsStop(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIAgentsStop_MissingRunField(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/stop", strings.NewReader(url.Values{}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStop(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsStop_NotInProgress(t *testing.T) {
+	resetLiveRuns(t)
+	form := url.Values{"run": {"123456789"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/stop", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStop(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleAPIAgentsStop_Success(t *testing.T) {
+	resetLiveRuns(t)
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting test process: %v", err)
+	}
+	defer cmd.Wait()
+	registerLiveRun(42, 1, cmd)
+
+	form := url.Values{"run": {"42"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/stop", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handleAPIAgentsStop(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if !wasStopRequested(42) {
+		t.Error("wasStopRequested(42) = false, want true after a successful stop request")
 	}
 }

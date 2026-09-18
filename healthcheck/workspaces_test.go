@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +16,38 @@ func TestUpsertWorkspace_NilDB(t *testing.T) {
 func TestListWorkspaces_NilDB(t *testing.T) {
 	if _, err := ListWorkspaces(nil); err == nil {
 		t.Fatal("ListWorkspaces(nil) = nil error, want an error")
+	}
+}
+
+func TestGetWorkspaceByPath_NilDB(t *testing.T) {
+	if _, err := GetWorkspaceByPath(nil, "/path"); err == nil {
+		t.Fatal("GetWorkspaceByPath(nil, ...) = nil error, want an error")
+	}
+}
+
+func TestGetWorkspaceByPath(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	const path = "/root/workspace/test-get-workspace-by-path"
+	t.Cleanup(func() { db.Exec(`DELETE FROM workspaces WHERE path = $1`, path) })
+
+	if err := UpsertWorkspace(db, "test-get-workspace-by-path", path, "https://example.com/x.git"); err != nil {
+		t.Fatalf("UpsertWorkspace() = %v, want nil", err)
+	}
+
+	got, err := GetWorkspaceByPath(db, path)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByPath() = %v, want nil", err)
+	}
+	if got.Name != "test-get-workspace-by-path" || got.RepoURL != "https://example.com/x.git" {
+		t.Errorf("GetWorkspaceByPath() = %+v, want name/repo_url matching the seeded row", got)
+	}
+
+	if _, err := GetWorkspaceByPath(db, "/no/such/path"); err == nil {
+		t.Error("GetWorkspaceByPath(unknown path) = nil error, want an error")
 	}
 }
 
@@ -159,14 +190,5 @@ func TestBackfillWorkspaces_InsertsMissingOnly(t *testing.T) {
 // findWorkspaceByPath is a test-only helper; production code only ever
 // needs ListWorkspaces.
 func findWorkspaceByPath(db *sql.DB, path string) (workspace, error) {
-	all, err := ListWorkspaces(db)
-	if err != nil {
-		return workspace{}, err
-	}
-	for _, w := range all {
-		if w.Path == path {
-			return w, nil
-		}
-	}
-	return workspace{}, fmt.Errorf("workspace %s not found", path)
+	return GetWorkspaceByPath(db, path)
 }
