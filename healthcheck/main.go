@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +19,14 @@ import (
 var templatesFS embed.FS
 
 var pageTmpl = template.Must(template.ParseFS(templatesFS, "templates/*.html"))
+
+// defaultLogTail is the number of lines fetched when a request doesn't
+// specify one; maxLogTail bounds a client-supplied "tail" query param so it
+// can't force an unbounded fetch through the API.
+const (
+	defaultLogTail = 200
+	maxLogTail     = 2000
+)
 
 type dashboardView struct {
 	Active       string
@@ -49,6 +58,16 @@ type reposView struct {
 	Reason  string
 	Repos   []repoListing
 	Jobs    map[string]*cloneJob
+}
+
+// logsView is the template data for the "logs" tab.
+type logsView struct {
+	Active     string
+	Enabled    bool
+	Reason     string
+	Containers []dockerLogContainer
+	Container  string
+	Entries    []logEntry
 }
 
 func jobsByName(jobs []*cloneJob) map[string]*cloneJob {
@@ -150,6 +169,41 @@ func handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleLogs renders the logs tab, server-rendering the initial tail so the
+// page isn't blank before the poll loop's first fetch completes.
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	result := gatherLogs(r.Context(), r.URL.Query().Get("container"), defaultLogTail)
+	view := logsView{
+		Active:     "logs",
+		Enabled:    result.Enabled,
+		Reason:     result.Reason,
+		Containers: result.Containers,
+		Container:  result.Container,
+		Entries:    result.Entries,
+	}
+	if err := pageTmpl.ExecuteTemplate(w, "logs.html", view); err != nil {
+		log.Printf("failed to render logs page: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// handleAPILogs serves the latest log tail as JSON, for the logs page's
+// poll loop.
+func handleAPILogs(w http.ResponseWriter, r *http.Request) {
+	tail := defaultLogTail
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= maxLogTail {
+			tail = n
+		}
+	}
+
+	result := gatherLogs(r.Context(), r.URL.Query().Get("container"), tail)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("failed to encode logs response: %v", err)
+	}
+}
+
 // isCoveragePath reports whether a /files/ path (already stripped of that
 // prefix) passes through a directory literally named "coverage" — the file
 // server only ever exposes coverage reports, not full repo contents.
@@ -232,6 +286,8 @@ func main() {
 	http.Handle("/api/repos/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposClone)))
 	http.Handle("/api/repos/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIReposStatus)))
 	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
+	http.Handle("/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleLogs)))
+	http.Handle("/api/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPILogs)))
 	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
 
 	addr := ":55123"

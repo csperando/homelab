@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -111,19 +112,16 @@ func formatContainerPorts(ports []dockerContainerPort) []string {
 	return out
 }
 
-// discoverDockerServices lists containers attached to homelab-net,
-// excluding the homelab container itself (identified by comparing its ID
-// against os.Hostname(), which Docker sets to the container's own short ID
-// by default — robust to a future container_name rename, unlike matching
-// on name).
+// hostnameFunc identifies the homelab container itself: os.Hostname() is set
+// by Docker to the container's own short ID by default, so comparing against
+// it is robust to a future container_name rename, unlike matching on name.
 var hostnameFunc = os.Hostname
 
-func discoverDockerServices(ctx context.Context) ([]dockerService, error) {
-	hostname, err := hostnameFunc()
-	if err != nil {
-		return nil, err
-	}
-
+// listNetworkContainers lists every container attached to homelab-net,
+// including the homelab container itself — the shared, unfiltered listing
+// call both discoverDockerServices (which excludes self) and
+// listLogContainers (which doesn't) build on.
+func listNetworkContainers(ctx context.Context) ([]dockerContainer, error) {
 	filters, err := json.Marshal(map[string][]string{"network": {homelabNetwork}})
 	if err != nil {
 		return nil, err
@@ -135,6 +133,59 @@ func discoverDockerServices(ctx context.Context) ([]dockerService, error) {
 
 	var containers []dockerContainer
 	if err := dockerGet(ctx, "/containers/json?"+query.Encode(), &containers); err != nil {
+		return nil, err
+	}
+	return containers, nil
+}
+
+// dockerLogContainer is the logs-tab-facing view of one loggable container —
+// enough to populate the container selector and validate a client-supplied
+// "container" query param against the real, current set.
+type dockerLogContainer struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Self bool   `json:"self"`
+}
+
+// listLogContainers lists every container on homelab-net, including the
+// homelab container itself (unlike discoverDockerServices), with self
+// sorted first so it's the logs tab's default selection — it's the most
+// relevant target for agentic-dev debugging.
+func listLogContainers(ctx context.Context) ([]dockerLogContainer, error) {
+	hostname, err := hostnameFunc()
+	if err != nil {
+		return nil, err
+	}
+
+	containers, err := listNetworkContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]dockerLogContainer, 0, len(containers))
+	for _, c := range containers {
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		out = append(out, dockerLogContainer{
+			ID:   c.ID,
+			Name: name,
+			Self: strings.HasPrefix(c.ID, hostname),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Self && !out[j].Self })
+	return out, nil
+}
+
+func discoverDockerServices(ctx context.Context) ([]dockerService, error) {
+	hostname, err := hostnameFunc()
+	if err != nil {
+		return nil, err
+	}
+
+	containers, err := listNetworkContainers(ctx)
+	if err != nil {
 		return nil, err
 	}
 

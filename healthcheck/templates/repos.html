@@ -2,7 +2,6 @@
 <html>
 <head>
   {{template "head" .}}
-  <meta http-equiv="refresh" content="10">
 </head>
 <body class="font-mono bg-hl-bg text-hl-text">
   <div class="max-w-3xl mx-auto p-8">
@@ -15,12 +14,15 @@
       <div class="mt-2">
         {{if .Enabled}}
           {{if .Repos}}
+          <input type="text" id="repo-filter" placeholder="filter repos&hellip;" autocomplete="off"
+            class="w-full sm:w-80 mb-3 bg-transparent border border-hl-border rounded px-2 py-1 text-sm text-hl-text placeholder-hl-muted focus:outline-none focus:border-sky-300">
           <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto_auto] gap-x-6 gap-y-1">
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">repo</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">description</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">visibility</span>
             <span class="hidden sm:block text-hl-muted text-xs uppercase tracking-wide pb-1 border-b border-hl-border">action</span>
             {{range .Repos}}
+            <div class="contents" data-search="{{.FullName}} {{.Description}}">
             <span class="min-w-0 truncate pt-2 sm:pt-1" title="{{.FullName}}"><span class="sm:hidden text-hl-muted">repo: </span>{{.FullName}}</span>
             <span class="min-w-0 truncate pt-2 sm:pt-1">{{if .Description}}{{.Description}}{{else}}<span class="text-hl-muted">&mdash;</span>{{end}}</span>
             <span class="pt-2 sm:pt-1">{{if .Private}}private{{else}}public{{end}}</span>
@@ -40,8 +42,10 @@
               {{end}}
             </span>
             <div class="col-span-full border-b border-hl-border pb-2 sm:pb-1"></div>
+            </div>
             {{end}}
           </div>
+          <p id="repo-filter-empty" class="hidden text-hl-muted mt-2">no repos match</p>
           {{else}}
           <p class="text-hl-muted">no repos found for this token</p>
           {{end}}
@@ -53,6 +57,38 @@
   </div>
   <script>
     (function () {
+      var filterInput = document.getElementById('repo-filter');
+      if (filterInput) {
+        var rows = document.querySelectorAll('[data-search]');
+        var emptyMsg = document.getElementById('repo-filter-empty');
+
+        function applyFilter(q) {
+          q = q.trim().toLowerCase();
+          var visible = 0;
+          rows.forEach(function (row) {
+            var match = !q || row.dataset.search.toLowerCase().indexOf(q) !== -1;
+            row.style.display = match ? '' : 'none';
+            if (match) visible++;
+          });
+          if (emptyMsg) emptyMsg.classList.toggle('hidden', visible !== 0);
+        }
+
+        var initial = new URLSearchParams(location.search).get('q') || '';
+        filterInput.value = initial;
+        applyFilter(initial);
+
+        filterInput.addEventListener('input', function () {
+          applyFilter(filterInput.value);
+          var url = new URL(location.href);
+          if (filterInput.value) {
+            url.searchParams.set('q', filterInput.value);
+          } else {
+            url.searchParams.delete('q');
+          }
+          history.replaceState(null, '', url);
+        });
+      }
+
       function updateRow(name, job) {
         var el = document.getElementById('repo-status-' + name);
         if (!el || !job) return;

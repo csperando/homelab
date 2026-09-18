@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+  {{template "head" .}}
+</head>
+<body class="font-mono bg-hl-bg text-hl-text">
+  <div class="max-w-3xl mx-auto p-8">
+    <h1 class="text-lg text-white font-semibold">homelab dev container</h1>
+
+    {{template "nav" .}}
+
+    <div class="mt-8">
+      <div class="flex items-center justify-between gap-4 flex-wrap">
+        <h2 class="text-sky-300 text-sm font-semibold">logs</h2>
+        {{if .Enabled}}
+        <select id="log-container-select" onchange="location.href='/logs?container='+encodeURIComponent(this.value)"
+          class="bg-transparent border border-hl-border rounded px-2 py-1 text-sm text-hl-text focus:outline-none focus:border-sky-300">
+          {{range .Containers}}
+          <option value="{{.Name}}" {{if eq .Name $.Container}}selected{{end}}>{{.Name}}{{if .Self}} (self){{end}}</option>
+          {{end}}
+        </select>
+        {{end}}
+      </div>
+      <div class="mt-2">
+        {{if .Enabled}}
+        <pre id="log-pane" data-container="{{.Container}}"
+          class="text-xs leading-5 whitespace-pre-wrap break-all max-h-[70vh] overflow-y-auto border border-hl-border rounded p-3">{{if .Entries}}{{range .Entries}}<span class="{{if eq .Stream "stderr"}}text-hl-warn{{end}}">{{.Text}}</span>
+{{end}}{{else}}{{.Reason}}{{end}}</pre>
+        {{else}}
+        <p class="text-hl-muted" title="opt in via DOCKER_SOCK_PATH in .env">{{.Reason}}</p>
+        {{end}}
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var pane = document.getElementById('log-pane');
+      if (!pane) return;
+
+      var container = pane.dataset.container || '';
+      var POLL_MS = 3000;
+
+      function isPinnedToBottom() {
+        return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+      }
+
+      function renderEntries(entries) {
+        pane.textContent = '';
+        entries.forEach(function (e) {
+          var span = document.createElement('span');
+          if (e.stream === 'stderr') span.className = 'text-hl-warn';
+          span.textContent = e.text + '\n';
+          pane.appendChild(span);
+        });
+      }
+
+      function poll() {
+        var pinned = isPinnedToBottom();
+        fetch('/api/logs?container=' + encodeURIComponent(container))
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data.entries && data.entries.length) {
+              renderEntries(data.entries);
+            } else {
+              pane.textContent = data.reason || '';
+            }
+            if (pinned) pane.scrollTop = pane.scrollHeight;
+          })
+          .catch(function () {})
+          .finally(function () { setTimeout(poll, POLL_MS); });
+      }
+
+      pane.scrollTop = pane.scrollHeight;
+      setTimeout(poll, POLL_MS);
+    })();
+  </script>
+</body>
+</html>
