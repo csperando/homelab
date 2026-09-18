@@ -44,6 +44,11 @@ func seedWorkspace(t *testing.T, db *sql.DB, name string) int64 {
 		t.Fatalf("seedWorkspace: findWorkspaceByPath: %v", err)
 	}
 	t.Cleanup(func() {
+		// approvals must go before agent_runs (it FK-references it) — an
+		// earlier version of this cleanup deleted agent_runs first, which
+		// silently failed on the FK violation (db.Exec's error was never
+		// checked) and left orphaned approvals/agent_runs rows behind.
+		db.Exec(`DELETE FROM approvals WHERE agent_run_id IN (SELECT id FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)))`, w.ID)
 		db.Exec(`DELETE FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1))`, w.ID)
 		db.Exec(`DELETE FROM tasks WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id = $1)`, w.ID)
 		db.Exec(`DELETE FROM agent_sessions WHERE workspace_id = $1`, w.ID)

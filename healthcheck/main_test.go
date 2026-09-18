@@ -460,6 +460,36 @@ func TestHandleAgents_ListsWorkspacesAndRuns(t *testing.T) {
 	}
 }
 
+func TestHandleAgents_ShowsPendingApproval(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	runID := seedAgentRun(t, dbConn, "agents-page-pending-approval")
+	if err := UpdateAgentRunState(dbConn, runID, agentRunAwaitingApproval, `{"type":"system"}`, ""); err != nil {
+		t.Fatalf("UpdateAgentRunState() = %v, want nil", err)
+	}
+	if _, err := CreateApproval(dbConn, runID, "Bash", `{"command":"git push origin main"}`, "gated command: git push origin main"); err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	handleAgents(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"gated command: git push origin main", "git push origin main", "approve", "deny", "data-approval-id"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agents body missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // waitForAgentRunDone polls GetAgentRun until it reaches a terminal state
 // or timeout elapses, for tests that need a background agent run to finish.
 func waitForAgentRunDone(t *testing.T, db *sql.DB, runID int64, timeout time.Duration) agentRun {
@@ -564,7 +594,7 @@ func TestHandleAPIAgentsStart_AlreadyInProgress(t *testing.T) {
 		t.Fatalf("starting fake in-progress process: %v", err)
 	}
 	defer cmd.Wait()
-	registerLiveRun(1, seeded.ID, cmd)
+	registerLiveRun(1, seeded.ID, "sess-1", cmd)
 
 	form := url.Values{"workspace": {ws}, "prompt": {"hi"}}
 	rec := httptest.NewRecorder()
@@ -689,7 +719,7 @@ func TestHandleAPIAgentsStatus_LiveOverridesPersisted(t *testing.T) {
 		t.Fatalf("starting fake process: %v", err)
 	}
 	defer cmd.Wait()
-	registerLiveRun(runID, 1, cmd)
+	registerLiveRun(runID, 1, "sess-live", cmd)
 	appendLiveRunLine(runID, `{"type":"system"}`)
 
 	rec := httptest.NewRecorder()
@@ -708,6 +738,43 @@ func TestHandleAPIAgentsStatus_LiveOverridesPersisted(t *testing.T) {
 	}
 	if run.Transcript != `{"type":"system"}` {
 		t.Errorf("run.Transcript = %q, want the live buffered transcript", run.Transcript)
+	}
+}
+
+func TestHandleAPIAgentsStatus_IncludesPendingApproval(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "agent-status-pending-approval")
+	if err := UpdateAgentRunState(dbConn, runID, agentRunAwaitingApproval, "", ""); err != nil {
+		t.Fatalf("UpdateAgentRunState() = %v, want nil", err)
+	}
+	a, err := CreateApproval(dbConn, runID, "Bash", `{"command":"rm -rf /tmp/x"}`, "gated command: rm -rf")
+	if err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/status?run="+strconv.FormatInt(runID, 10), nil)
+	handleAPIAgentsStatus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		State           agentRunState `json:"state"`
+		PendingApproval *approval     `json:"pending_approval"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if resp.PendingApproval == nil {
+		t.Fatal("pending_approval = nil, want the approval just created")
+	}
+	if resp.PendingApproval.ID != a.ID {
+		t.Errorf("pending_approval.ID = %d, want %d", resp.PendingApproval.ID, a.ID)
 	}
 }
 
@@ -752,7 +819,7 @@ func TestHandleAPIAgentsStop_Success(t *testing.T) {
 		t.Fatalf("starting test process: %v", err)
 	}
 	defer cmd.Wait()
-	registerLiveRun(42, 1, cmd)
+	registerLiveRun(42, 1, "sess-42", cmd)
 
 	form := url.Values{"run": {"42"}}
 	rec := httptest.NewRecorder()
@@ -765,5 +832,306 @@ func TestHandleAPIAgentsStop_Success(t *testing.T) {
 	}
 	if !wasStopRequested(42) {
 		t.Error("wasStopRequested(42) = false, want true after a successful stop request")
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_MethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/hooks/pre-tool-use", nil)
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_SecretUnset(t *testing.T) {
+	withAgentHookSecret(t, "")
+
+	body := strings.NewReader(`{"session_id":"sess-x","tool_name":"Bash","tool_input":{"command":"git push"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer ")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d (an unset secret must never authenticate)", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_WrongSecret(t *testing.T) {
+	withAgentHookSecret(t, "the-real-secret")
+
+	body := strings.NewReader(`{"session_id":"sess-x","tool_name":"Bash","tool_input":{"command":"git push"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer wrong-secret")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_NonGatedCommand_Allows(t *testing.T) {
+	withAgentHookSecret(t, "the-real-secret")
+
+	body := strings.NewReader(`{"session_id":"sess-x","tool_name":"Bash","tool_input":{"command":"ls -la"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer the-real-secret")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"permissionDecision":"allow"`) {
+		t.Errorf("body = %s, want an explicit allow decision", rec.Body.String())
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_NonBashTool_Allows(t *testing.T) {
+	withAgentHookSecret(t, "the-real-secret")
+
+	// Even a command-shaped string is irrelevant for a non-Bash tool.
+	body := strings.NewReader(`{"session_id":"sess-x","tool_name":"Read","tool_input":{"command":"git push"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer the-real-secret")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if !strings.Contains(rec.Body.String(), `"permissionDecision":"allow"`) {
+		t.Errorf("body = %s, want an explicit allow decision for a non-Bash tool", rec.Body.String())
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_GatedCommand_DeniesAndRecordsApproval(t *testing.T) {
+	resetLiveRuns(t)
+	withAgentHookSecret(t, "the-real-secret")
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "hook-gated-command")
+
+	cmd := exec.Command("sleep", "0.2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting test process: %v", err)
+	}
+	defer cmd.Wait()
+	registerLiveRun(runID, 1, "sess-gated", cmd)
+
+	body := strings.NewReader(`{"session_id":"sess-gated","tool_name":"Bash","tool_input":{"command":"git push origin main"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer the-real-secret")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"permissionDecision":"deny"`) {
+		t.Errorf("body = %s, want an explicit deny decision", rec.Body.String())
+	}
+
+	approvals, err := ListApprovalsForRun(dbConn, runID)
+	if err != nil {
+		t.Fatalf("ListApprovalsForRun() = %v, want nil", err)
+	}
+	if len(approvals) != 1 {
+		t.Fatalf("ListApprovalsForRun() = %+v, want exactly one pending approval", approvals)
+	}
+	if approvals[0].State != approvalPending {
+		t.Errorf("approvals[0].State = %q, want %q", approvals[0].State, approvalPending)
+	}
+	if approvals[0].ToolName != "Bash" || !strings.Contains(approvals[0].ToolInput, "git push origin main") {
+		t.Errorf("approvals[0] = %+v, want ToolName=Bash and ToolInput containing the command", approvals[0])
+	}
+}
+
+func TestHandleAPIAgentsPreToolUseHook_UnknownSession_DeniesWithoutApproval(t *testing.T) {
+	resetLiveRuns(t)
+	withAgentHookSecret(t, "the-real-secret")
+
+	body := strings.NewReader(`{"session_id":"sess-does-not-exist","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", body)
+	req.Header.Set("Authorization", "Bearer the-real-secret")
+	handleAPIAgentsPreToolUseHook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"permissionDecision":"deny"`) {
+		t.Errorf("body = %s, want an explicit deny decision (fail closed) even with an unresolvable session", rec.Body.String())
+	}
+}
+
+func decideRequest(approvalID int64, decision string) *http.Request {
+	form := url.Values{"approval": {strconv.FormatInt(approvalID, 10)}, "decision": {decision}}
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/approvals/decide", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func TestHandleAPIAgentsApprovalsDecide_MethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/approvals/decide", nil)
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleAPIAgentsApprovalsDecide_InvalidDecision(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := decideRequest(1, "maybe")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIAgentsApprovalsDecide_UnknownApproval(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+
+	rec := httptest.NewRecorder()
+	req := decideRequest(999999999, "deny")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleAPIAgentsApprovalsDecide_AlreadyDecided(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "decide-already-decided")
+	a, err := CreateApproval(dbConn, runID, "Bash", `{"command":"git push"}`, "gated command: git push")
+	if err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+	if err := UpdateApprovalState(dbConn, a.ID, approvalDenied); err != nil {
+		t.Fatalf("UpdateApprovalState() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := decideRequest(a.ID, "approve")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestHandleAPIAgentsApprovalsDecide_Deny(t *testing.T) {
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	runID := seedAgentRun(t, dbConn, "decide-deny")
+
+	// Give the run a real pre-existing transcript, to confirm denying
+	// doesn't wipe it.
+	const existingTranscript = `{"type":"system"}`
+	if err := UpdateAgentRunState(dbConn, runID, agentRunAwaitingApproval, existingTranscript, ""); err != nil {
+		t.Fatalf("UpdateAgentRunState() = %v, want nil", err)
+	}
+	a, err := CreateApproval(dbConn, runID, "Bash", `{"command":"git push origin main"}`, "gated command: git push origin main")
+	if err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := decideRequest(a.ID, "deny")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+
+	gotApproval, err := GetApproval(dbConn, a.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() = %v, want nil", err)
+	}
+	if gotApproval.State != approvalDenied || gotApproval.DecidedAt == nil {
+		t.Errorf("gotApproval = %+v, want State=denied and a non-nil DecidedAt", gotApproval)
+	}
+
+	gotRun, err := GetAgentRun(dbConn, runID)
+	if err != nil {
+		t.Fatalf("GetAgentRun() = %v, want nil", err)
+	}
+	if gotRun.State != agentRunFailed {
+		t.Errorf("gotRun.State = %q, want %q", gotRun.State, agentRunFailed)
+	}
+	if gotRun.Error != "approval denied by operator" {
+		t.Errorf("gotRun.Error = %q, want %q", gotRun.Error, "approval denied by operator")
+	}
+	if gotRun.Transcript != existingTranscript {
+		t.Errorf("gotRun.Transcript = %q, want it preserved as %q (not wiped)", gotRun.Transcript, existingTranscript)
+	}
+}
+
+func TestHandleAPIAgentsApprovalsDecide_Approve(t *testing.T) {
+	resetLiveRuns(t)
+	dbConn := testDB(t)
+	if err := runMigrations(dbConn); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	withDB(t, dbConn)
+	withAgentRunner(t, `printf '%s\n' '{"type":"result","subtype":"success","is_error":false}'`)
+
+	runID := seedAgentRun(t, dbConn, "decide-approve")
+	const originalSessionID = "original-claude-session-id"
+	if err := SetAgentRunClaudeSessionID(dbConn, runID, originalSessionID); err != nil {
+		t.Fatalf("SetAgentRunClaudeSessionID() = %v, want nil", err)
+	}
+	a, err := CreateApproval(dbConn, runID, "Bash", `{"command":"git push origin main"}`, "gated command: git push origin main")
+	if err != nil {
+		t.Fatalf("CreateApproval() = %v, want nil", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := decideRequest(a.ID, "approve")
+	handleAPIAgentsApprovalsDecide(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var newRun agentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &newRun); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+	if newRun.ID == runID {
+		t.Error("approve reused the original run's ID, want a genuinely new Agent Run")
+	}
+
+	gotApproval, err := GetApproval(dbConn, a.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() = %v, want nil", err)
+	}
+	if gotApproval.State != approvalApproved {
+		t.Errorf("gotApproval.State = %q, want %q", gotApproval.State, approvalApproved)
+	}
+
+	done := waitForAgentRunDone(t, dbConn, newRun.ID, 5*time.Second)
+	if done.State != agentRunSucceeded {
+		t.Errorf("done.State = %q, want %q (error: %s)", done.State, agentRunSucceeded, done.Error)
+	}
+	if done.ClaudeSessionID != originalSessionID {
+		t.Errorf("done.ClaudeSessionID = %q, want %q (the resumed run must reuse the original session)", done.ClaudeSessionID, originalSessionID)
 	}
 }

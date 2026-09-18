@@ -83,6 +83,24 @@ func GetWorkspaceByPath(db *sql.DB, path string) (workspace, error) {
 	return w, nil
 }
 
+// GetWorkspaceByID looks up a single workspace by ID — the approve/deny
+// endpoint uses it to find the directory a resumed Agent Run should start
+// against.
+func GetWorkspaceByID(db *sql.DB, workspaceID int64) (workspace, error) {
+	if db == nil {
+		return workspace{}, fmt.Errorf("postgres unavailable")
+	}
+	var w workspace
+	err := db.QueryRow(`
+		SELECT id, name, path, repo_url, env_config::text, created_at
+		FROM workspaces WHERE id = $1
+	`, workspaceID).Scan(&w.ID, &w.Name, &w.Path, &w.RepoURL, &w.EnvConfig, &w.CreatedAt)
+	if err != nil {
+		return workspace{}, fmt.Errorf("getting workspace %d: %w", workspaceID, err)
+	}
+	return w, nil
+}
+
 // workspaceRow is the template-facing merge of a persisted workspace with
 // its live git status — branch/dirty are never persisted (see workspace's
 // doc comment), so this join happens at request time, by path.

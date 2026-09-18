@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -73,6 +74,11 @@ type agentsView struct {
 	RunsEnabled       bool
 	RunsReason        string
 	Runs              []agentRun
+	// PendingApprovals is keyed by AgentRunID, populated only for runs
+	// currently awaiting_approval — a pointer so the template's {{with}}
+	// correctly treats a missing entry as absent (a zero-value struct
+	// would otherwise be treated as present).
+	PendingApprovals map[int64]*approval
 }
 
 // logsView is the template data for the "logs" tab.
@@ -209,6 +215,12 @@ func handleAgents(w http.ResponseWriter, r *http.Request) {
 	} else {
 		view.RunsEnabled = true
 		view.Runs = runs
+		view.PendingApprovals = make(map[int64]*approval)
+		for _, run := range runs {
+			if run.State == agentRunAwaitingApproval {
+				view.PendingApprovals[run.ID] = findPendingApproval(run.ID)
+			}
+		}
 	}
 
 	if err := pageTmpl.ExecuteTemplate(w, "agents.html", view); err != nil {
@@ -306,8 +318,16 @@ func handleAPIAgentsStatus(w http.ResponseWriter, r *http.Request) {
 		run.Transcript = transcript
 	}
 
+	resp := struct {
+		agentRun
+		PendingApproval *approval `json:"pending_approval,omitempty"`
+	}{agentRun: run}
+	if run.State == agentRunAwaitingApproval {
+		resp.PendingApproval = findPendingApproval(runID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(run); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("failed to encode agent status response: %v", err)
 	}
 }
@@ -341,6 +361,208 @@ func handleAPIAgentsStop(w http.ResponseWriter, r *http.Request) {
 	go escalateStopAfterGracePeriod(runID)
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// preToolUseHookPayload is the subset of a PreToolUse HTTP hook's JSON
+// input this handler reads (see ensureAgentHookSettingsFile in
+// agentprocess.go for the hook config that posts here).
+type preToolUseHookPayload struct {
+	SessionID string `json:"session_id"`
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		Command string `json:"command"`
+	} `json:"tool_input"`
+}
+
+type hookSpecificOutput struct {
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"`
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
+}
+
+func writeHookDecision(w http.ResponseWriter, decision, reason string) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
+	}{
+		HookSpecificOutput: hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       decision,
+			PermissionDecisionReason: reason,
+		},
+	})
+}
+
+// handleAPIAgentsPreToolUseHook receives every Bash call a headless agent
+// run attempts (the PreToolUse HTTP hook attached via
+// ensureAgentHookSettingsFile) and denies gated ones immediately,
+// recording a pending Approval — it never waits and never live-approves
+// anything. (Researched in goal.md: a PreToolUse hook fails OPEN on
+// timeout, so waiting for a decision here would be a silent bypass, not a
+// safety net.) Deliberately not behind withAuth — the subprocess has no
+// dashboard credentials — authenticated via a shared secret header instead.
+func handleAPIAgentsPreToolUseHook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// An unset configured secret must never be treated as a valid
+	// credential just because it happens to match an equally-empty header
+	// — reject unconditionally rather than falling into the compare below.
+	if agentHookSecret == "" {
+		http.Error(w, "approval hook not configured", http.StatusUnauthorized)
+		return
+	}
+
+	const bearerPrefix = "Bearer "
+	presented := strings.TrimPrefix(r.Header.Get("Authorization"), bearerPrefix)
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(agentHookSecret)) != 1 {
+		log.Printf("agent hook: rejected request with an invalid or missing shared secret")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var payload preToolUseHookPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if payload.ToolName != "Bash" || !isGatedCommand(payload.ToolInput.Command) {
+		writeHookDecision(w, "allow", "")
+		return
+	}
+
+	runID, ok := liveRunBySessionID(payload.SessionID)
+	if !ok {
+		// Fail closed even though we can't attach an Approval to any run:
+		// an unresolvable session_id for a gated command is unexpected
+		// (every run registers its session_id before it can reach a tool
+		// call) and worth a log line, but must never be treated as
+		// permission to proceed.
+		log.Printf("agent hook: gated command denied for unresolved session_id %q (no run found, no approval recorded)", payload.SessionID)
+		writeHookDecision(w, "deny", "no active run found for this session")
+		return
+	}
+
+	toolInputJSON, err := json.Marshal(payload.ToolInput)
+	if err != nil {
+		toolInputJSON = []byte(payload.ToolInput.Command)
+	}
+	reason := fmt.Sprintf("gated command: %s", payload.ToolInput.Command)
+	if _, err := CreateApproval(db, runID, payload.ToolName, string(toolInputJSON), reason); err != nil {
+		log.Printf("agent run %d: failed to record approval: %v", runID, err)
+	}
+
+	writeHookDecision(w, "deny", "awaiting operator approval — resume this session once approved")
+}
+
+// handleAPIAgentsApprovalsDecide records an operator's decision on a
+// pending Approval. Denying just closes out the original run; approving
+// starts a *new* Agent Run for the same Task's session, resuming the
+// original claude session (--resume) rather than starting fresh — see
+// startResumedAgentRun. Behind withAuth, unlike the hook endpoint that
+// creates Approvals — this route is operator-facing.
+func handleAPIAgentsApprovalsDecide(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	approvalID, err := strconv.ParseInt(r.FormValue("approval"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid or missing approval field", http.StatusBadRequest)
+		return
+	}
+	decision := r.FormValue("decision")
+	if decision != "approve" && decision != "deny" {
+		http.Error(w, `decision must be "approve" or "deny"`, http.StatusBadRequest)
+		return
+	}
+
+	appr, err := GetApproval(db, approvalID)
+	if err != nil {
+		http.Error(w, "unknown approval", http.StatusNotFound)
+		return
+	}
+	if appr.State != approvalPending {
+		http.Error(w, "approval already decided", http.StatusConflict)
+		return
+	}
+
+	if decision == "deny" {
+		if err := UpdateApprovalState(db, appr.ID, approvalDenied); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		run, err := GetAgentRun(db, appr.AgentRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Preserve the run's existing transcript — UpdateAgentRunState
+		// overwrites the column, so passing "" here would wipe it.
+		if err := UpdateAgentRunState(db, run.ID, agentRunFailed, run.Transcript, "approval denied by operator"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if err := UpdateApprovalState(db, appr.ID, approvalApproved); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	originalRun, err := GetAgentRun(db, appr.AgentRunID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	originalTask, err := GetTask(db, originalRun.TaskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	session, err := GetAgentSession(db, originalTask.AgentSessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ws, err := GetWorkspaceByID(db, session.WorkspaceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	prompt := fmt.Sprintf("The following action has been approved by the operator: %s %s. Proceed with it now.", appr.ToolName, appr.ToolInput)
+
+	newTask, err := CreateTask(db, session.ID, prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	newRun, err := CreateAgentRun(db, newTask.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	startResumedAgentRun(newRun.ID, ws.ID, ws.Path, prompt, originalRun.ClaudeSessionID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(newRun); err != nil {
+		log.Printf("failed to encode approval decision response: %v", err)
+	}
 }
 
 // handleLogs renders the logs tab, server-rendering the initial tail so the
@@ -452,6 +674,9 @@ func main() {
 	if msg := githubExposureWarning(adminUser, adminPass, githubToken); msg != "" {
 		log.Println(msg)
 	}
+	if msg := agentHookSecretWarning(); msg != "" {
+		log.Println(msg)
+	}
 
 	// Postgres is best-effort at startup: an unreachable database disables
 	// DB-backed features (degrading like every other optional integration
@@ -483,6 +708,11 @@ func main() {
 	http.Handle("/api/agents/start", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStart)))
 	http.Handle("/api/agents/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStatus)))
 	http.Handle("/api/agents/stop", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStop)))
+	// Deliberately not wrapped in withAuth: the claude subprocess has no
+	// dashboard credentials and authenticates via agentHookSecret instead
+	// (see handleAPIAgentsPreToolUseHook).
+	http.HandleFunc("/api/agents/hooks/pre-tool-use", handleAPIAgentsPreToolUseHook)
+	http.Handle("/api/agents/approvals/decide", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsApprovalsDecide)))
 	http.Handle("/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleLogs)))
 	http.Handle("/api/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPILogs)))
 	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))

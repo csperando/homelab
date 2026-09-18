@@ -137,7 +137,13 @@ A small embedded Go HTTP service, split by concern:
   `/api/workspaces/clone` and `/api/workspaces/status` (workspaces tab backing endpoints,
   see below), `/agents` (the agents tab: start/observe/stop a headless `claude` run
   against a workspace — see `agentruns.go`/`agentprocess.go` below), `/api/agents/start`,
-  `/api/agents/status` (per-run, `?run=<id>`), and `/api/agents/stop`, and `/files/` (a
+  `/api/agents/status` (per-run, `?run=<id>`, includes `pending_approval` when the run is
+  `awaiting_approval`), `/api/agents/stop`, `/api/agents/hooks/pre-tool-use` (the
+  `PreToolUse` callback target a headless run's own `claude` subprocess posts to —
+  deliberately *not* behind `withAuth`, since the subprocess has no dashboard
+  credentials; authenticated via `agentHookSecret` instead — see `approvals.go`/
+  `approvalgate.go` below), and `/api/agents/approvals/decide` (operator-facing, behind
+  `withAuth`, unlike the hook endpoint), and `/files/` (a
   file server restricted to serving only paths that pass through a directory literally
   named `coverage` — see `isCoveragePath`/`coverageOnly` — not general workspace file
   access).
@@ -174,35 +180,94 @@ A small embedded Go HTTP service, split by concern:
   server starts serving. A migration failure is fatal (`log.Fatalf`) — distinct from
   Postgres simply being unreachable, which degrades instead.
 - `workspaces.go` — the `workspaces` table's repository layer (`UpsertWorkspace`,
-  `ListWorkspaces`, `GetWorkspaceByPath`) plus `backfillWorkspaces` (fills in any repo
-  already on disk under `workspaceDir` that predates this feature) and
+  `ListWorkspaces`, `GetWorkspaceByPath`, `GetWorkspaceByID`) plus `backfillWorkspaces`
+  (fills in any repo already on disk under `workspaceDir` that predates this feature) and
   `mergeWorkspaceRows` (joins persisted workspaces with `scanWorkspaceRepos`' live
   branch/dirty state by path at request time — branch/dirty are intentionally never
   persisted, so they can't go stale).
 - `agentruns.go` — the `agent_sessions`/`tasks`/`agent_runs` repository layer
-  (`CreateAgentSession`, `CreateTask`, `CreateAgentRun`, `SetAgentRunClaudeSessionID`,
-  `UpdateAgentRunState`, `GetAgentRun`, `ListAgentRuns`), plus `ReconcileAgentRuns` (run
-  once at startup, alongside `backfillWorkspaces`: marks any run still `pending`/
-  `running` as `interrupted`, since the in-memory live-run store below is always empty on
-  a fresh process start — a row in one of those states means a previous `healthcheck`
-  process was killed/restarted mid-run). An `agent_runs.transcript` is only ever written
-  once, when the run finishes — never incrementally (see `agentprocess.go`).
+  (`CreateAgentSession`, `GetAgentSession`, `CreateTask`, `GetTask`, `CreateAgentRun`,
+  `SetAgentRunClaudeSessionID`, `UpdateAgentRunState`, `GetAgentRun`, `ListAgentRuns`),
+  plus `ReconcileAgentRuns` (run once at startup, alongside `backfillWorkspaces`: marks
+  any run still `pending`/`running` as `interrupted`, since the in-memory live-run store
+  below is always empty on a fresh process start — a row in one of those states means a
+  previous `healthcheck` process was killed/restarted mid-run). An `agent_runs.state` of
+  `awaiting_approval` means a gated action was denied and a decision is pending — see
+  `approvals.go`. An `agent_runs.transcript` is only ever written once, when the run
+  finishes — never incrementally (see `agentprocess.go`).
+- `approvals.go` — the `approvals` table's repository layer (`CreateApproval`,
+  `GetApproval`, `ListApprovalsForRun`, `UpdateApprovalState`). One row per gated tool
+  call the `PreToolUse` hook denies; always created `pending`, resolved by the operator
+  via `/api/agents/approvals/decide`, never by the run itself (see Approvals below).
+- `approvalgate.go` — `isGatedCommand`, a pure substring match (not anchored to the
+  command's start, so a gated action embedded in a compound command like
+  `cd repo && git push` is still caught) against a fixed, hardcoded list (`git commit`,
+  `git push`, `rm -rf`/`-fr`) — a practical gate for cooperative agent behavior, not an
+  adversarial-proof sandbox, since `Bash` is general-purpose.
 - `agentprocess.go` — the headless `claude` invocation and its in-memory live-run store
   (`liveRuns`, mirroring `clone.go`'s `cloneJobs` map but keyed by run ID, with a
-  `workspaceHasLiveRun` linear-scan helper for the one place that needs to search by
-  workspace instead — fine at this scale). `runAgent` spawns `claude --print
-  --output-format stream-json --permission-prompts none --restricted --tools
-  Read,Write,Edit,Bash --max-budget-usd <cap>` (never `--dangerously-skip-permissions` —
-  that flag is scoped by Anthropic to network-isolated sandboxes, which this container is
-  not) via `exec.Command` (`agentRunner` is a swappable package var, mirroring
-  `cloneRunner`, so tests exercise the real JSONL-parsing logic against a cheap `sh -c`
-  fake instead of the real, paid `claude` CLI), streams stdout line-by-line into the
-  live-run store, and persists the final outcome via `finishAgentRun` — which checks the
-  run isn't already terminal before writing, guarding against a race with the stop
-  action. `requestStop`/`escalateStopAfterGracePeriod` implement stop: `SIGTERM`,
-  escalating to `SIGKILL` after `stopGracePeriod` if the process hasn't exited; the
-  stop-requested flag is only set once the signal is confirmed delivered, so a run that
-  happens to finish naturally at the same moment is never mis-reported as stopped.
+  `ClaudeSessionID` field and `liveRunBySessionID`/`workspaceHasLiveRun` linear-scan
+  helpers for the two places that need to search by something other than run ID — fine
+  at this scale). `runAgent` spawns `claude --print --verbose --output-format
+  stream-json --permission-prompts none --restricted --tools Read,Write,Edit,Bash
+  --max-budget-usd <cap>` (never `--dangerously-skip-permissions` — that flag is scoped
+  by Anthropic to network-isolated sandboxes, which this container is not) via
+  `exec.Command` (`agentRunner` is a swappable package var, mirroring `cloneRunner`, so
+  tests exercise the real JSONL-parsing logic against a cheap `sh -c` fake instead of the
+  real, paid `claude` CLI) — `--verbose` is required alongside `--print
+  --output-format=stream-json` or `claude` refuses to start; this was a real bug in
+  already-shipped code with no automated test catching it, since every test uses the
+  fake, never the real binary. Generates its own UUID and passes `--session-id` at spawn
+  time (rather than reading whatever `claude` would auto-assign back out of the stream)
+  so the approval hook — which fires mid-run, synchronously — can always resolve a
+  callback's `session_id` straight back to a run; `startResumedAgentRun`/`runAgent`'s
+  `resumeSessionID` param takes the opposite path for the approve action, passing
+  `--resume <existing session>` instead, genuinely continuing the same conversation
+  rather than starting fresh (live-verified: a fact stated in one `claude` invocation was
+  correctly recalled by a second, independent invocation resuming that session).
+
+  Streams stdout line-by-line into the live-run store, and persists the final outcome via
+  `finishAgentRun` — which checks the run isn't already terminal before writing, guarding
+  against a race with the stop action. `requestStop`/`escalateStopAfterGracePeriod`
+  implement stop: `SIGTERM`, escalating to `SIGKILL` after `stopGracePeriod` if the
+  process hasn't exited; the stop-requested flag is only set once the signal is confirmed
+  delivered, so a run that happens to finish naturally at the same moment is never
+  mis-reported as stopped. `findPendingApproval`/`hasPendingApproval` override a run's
+  completion state to `awaiting_approval` (alongside the `stopped` override) when the
+  `PreToolUse` hook recorded one — a real run whose gated command was denied still
+  reports a normal successful transcript (the model gracefully explains it and ends the
+  turn), so without this override it would be mis-reported as succeeded.
+
+  Also owns the approval hook's plumbing: `agentHookSecret` (env var
+  `AGENT_HOOK_SECRET`, read once via `os.Getenv` — **never generated or set by this
+  program**, provisioning it is a manual step, see `.env.sample`) and
+  `ensureAgentHookSettingsFile` (mirrors `clone.go`'s `ensureAskpassScript`: writes a
+  static `settings.json` to `os.TempDir()` each run, since HTTP hooks can only be
+  configured via a real settings file, not an inline `--settings` JSON string —
+  confirmed against Anthropic's docs). `buildAgentArgs` only attaches `--settings <path>`
+  when the secret is configured; if it's unset, the hook is never attached at all
+  (Approval gating degrades off, same as Phase 4's fully-unattended behavior) rather than
+  attaching a hook nothing could ever authenticate against, and `agentHookSecretWarning`
+  logs once at startup, mirroring `githubExposureWarning`.
+
+  `handleAPIAgentsPreToolUseHook` (`main.go`) is that settings file's `PreToolUse` HTTP
+  hook target (`matcher: "Bash"`): validates the shared secret with
+  `subtle.ConstantTimeCompare` (an unset configured secret is never treated as valid,
+  even against an equally-empty header), and for a `Bash` call whose command matches
+  `isGatedCommand` (`approvalgate.go`) creates a pending `Approval`
+  (`approvals.go`) and responds with an explicit `permissionDecision: "deny"` —
+  it never waits and never live-approves anything. This is deliberate, not a shortcut:
+  live-testing found that a `PreToolUse` hook fails *open* on timeout (Anthropic's docs:
+  a timed-out hook "doesn't block the tool call... don't count on a stalled hook to act
+  as a gate"), so a bounded-wait-then-deny design would have been a silent bypass: real
+  indefinite blocking on a tool-call decision is a Claude Agent SDK feature
+  (`canUseTool`), not something the CLI supports, and adopting the SDK for this alone
+  would reverse the "not the Agent SDK, stays inside `healthcheck/`" decision from
+  Phase 4. `handleAPIAgentsApprovalsDecide` (`main.go`, behind `withAuth` unlike the hook
+  endpoint) is where the operator actually decides: deny marks the `Approval` denied and
+  the original run `failed`; approve marks it approved and starts a **new** Agent Run
+  (`startResumedAgentRun`) that resumes the original `claude` session — the pending
+  Approval's tool call is never retried in place.
 
 ### Claude Code skills (`.claude/skills/`)
 

@@ -48,6 +48,18 @@
               </div>
               <pre class="agent-run-transcript mt-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{{.Transcript}}</pre>
               <button type="button" class="agent-run-stop text-hl-warn underline text-xs mt-1{{if not (or (eq .State "pending") (eq .State "running"))}} hidden{{end}}">stop</button>
+              <div class="agent-run-approval-slot">
+                {{if eq .State "awaiting_approval"}}
+                  {{with index $.PendingApprovals .ID}}
+                  <div class="agent-run-approval mt-2 border border-hl-warn rounded p-2" data-approval-id="{{.ID}}">
+                    <p class="text-xs text-hl-warn">{{.Reason}}</p>
+                    <p class="text-xs text-hl-muted mt-1">{{.ToolName}}: {{.ToolInput}}</p>
+                    <button type="button" class="agent-approval-approve text-hl-ok underline text-xs mt-1">approve</button>
+                    <button type="button" class="agent-approval-deny text-hl-warn underline text-xs mt-1 ml-2">deny</button>
+                  </div>
+                  {{end}}
+                {{end}}
+              </div>
             </div>
             {{end}}
           {{else}}
@@ -65,16 +77,87 @@
         return state === 'pending' || state === 'running';
       }
 
+      function escapeHTML(s) {
+        var d = document.createElement('div');
+        d.textContent = s == null ? '' : String(s);
+        return d.innerHTML;
+      }
+
+      function approvalHTML(approval) {
+        return '<div class="agent-run-approval mt-2 border border-hl-warn rounded p-2" data-approval-id="' + approval.id + '">' +
+          '<p class="text-xs text-hl-warn">' + escapeHTML(approval.reason) + '</p>' +
+          '<p class="text-xs text-hl-muted mt-1">' + escapeHTML(approval.tool_name) + ': ' + escapeHTML(approval.tool_input) + '</p>' +
+          '<button type="button" class="agent-approval-approve text-hl-ok underline text-xs mt-1">approve</button>' +
+          '<button type="button" class="agent-approval-deny text-hl-warn underline text-xs mt-1 ml-2">deny</button>' +
+          '</div>';
+      }
+
+      function decideApproval(approvalID, decision) {
+        return fetch('/api/agents/approvals/decide', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'approval=' + encodeURIComponent(approvalID) + '&decision=' + decision
+        }).then(function (r) {
+          if (!r.ok) return r.text().then(function (msg) { throw new Error(msg); });
+          return decision === 'approve' ? r.json() : null;
+        });
+      }
+
+      // Wires approve/deny clicks for whatever .agent-run-approval element
+      // currently lives in slot (works for both the server-rendered one and
+      // any later injected by renderRun via approvalHTML).
+      function attachApproval(slot, originalRunID) {
+        var el = slot.querySelector('.agent-run-approval');
+        if (!el) return;
+        var approvalID = el.getAttribute('data-approval-id');
+
+        var approveBtn = el.querySelector('.agent-approval-approve');
+        var denyBtn = el.querySelector('.agent-approval-deny');
+        if (approveBtn) {
+          approveBtn.addEventListener('click', function () {
+            decideApproval(approvalID, 'approve')
+              .then(function (newRun) {
+                el.remove();
+                if (newRun) addRunCard(newRun, originalRunID);
+              })
+              .catch(function () {});
+          });
+        }
+        if (denyBtn) {
+          denyBtn.addEventListener('click', function () {
+            decideApproval(approvalID, 'deny')
+              .then(function () {
+                el.remove();
+                var container = document.querySelector('#agent-runs [data-run-id="' + originalRunID + '"]');
+                if (container) poll(originalRunID, container);
+              })
+              .catch(function () {});
+          });
+        }
+      }
+
       function renderRun(container, run) {
         var status = container.querySelector('.agent-run-status');
         var transcript = container.querySelector('.agent-run-transcript');
         var stopBtn = container.querySelector('.agent-run-stop');
+        var approvalSlot = container.querySelector('.agent-run-approval-slot');
         if (status) status.textContent = run.state;
         if (transcript) {
           transcript.textContent = run.transcript || '';
           transcript.scrollTop = transcript.scrollHeight;
         }
         if (stopBtn) stopBtn.classList.toggle('hidden', !isActive(run.state));
+        if (approvalSlot) {
+          var existing = approvalSlot.querySelector('.agent-run-approval');
+          if (run.pending_approval) {
+            if (!existing) {
+              approvalSlot.innerHTML = approvalHTML(run.pending_approval);
+              attachApproval(approvalSlot, run.id);
+            }
+          } else if (existing) {
+            existing.remove();
+          }
+        }
       }
 
       function poll(runID, container) {
@@ -101,10 +184,40 @@
         });
       }
 
-      // Resume polling for any run that's already in-flight on page load.
+      // Builds a new run's card (used both for a freshly-started run and a
+      // resumed run created by approving), optionally noting which run it
+      // continues from.
+      function addRunCard(run, continuesFromRunID) {
+        var runsList = document.getElementById('agent-runs');
+        var empty = runsList.querySelector('p');
+        if (empty) empty.remove();
+        var container = document.createElement('div');
+        container.className = 'border border-hl-border rounded p-3';
+        container.setAttribute('data-run-id', run.id);
+        var note = continuesFromRunID
+          ? '<span class="text-xs text-hl-muted">run ' + run.id + ' &middot; continues run ' + continuesFromRunID + '</span>'
+          : '<span class="text-xs text-hl-muted">run ' + run.id + '</span>';
+        container.innerHTML =
+          '<div class="flex justify-between items-center">' +
+          note +
+          '<span class="agent-run-status text-xs">' + run.state + '</span>' +
+          '</div>' +
+          '<pre class="agent-run-transcript mt-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto"></pre>' +
+          '<button type="button" class="agent-run-stop text-hl-warn underline text-xs mt-1">stop</button>' +
+          '<div class="agent-run-approval-slot"></div>';
+        runsList.insertBefore(container, runsList.firstChild);
+        attachStop(container, run.id);
+        poll(run.id, container);
+        return container;
+      }
+
+      // Resume polling for any run that's already in-flight on page load,
+      // and wire up any server-rendered pending approval.
       document.querySelectorAll('#agent-runs [data-run-id]').forEach(function (container) {
         var runID = container.getAttribute('data-run-id');
         attachStop(container, runID);
+        var approvalSlot = container.querySelector('.agent-run-approval-slot');
+        if (approvalSlot) attachApproval(approvalSlot, runID);
         var status = container.querySelector('.agent-run-status');
         if (status && isActive(status.textContent.trim())) {
           poll(runID, container);
@@ -126,22 +239,7 @@
               return r.json();
             })
             .then(function (run) {
-              var runsList = document.getElementById('agent-runs');
-              var empty = runsList.querySelector('p');
-              if (empty) empty.remove();
-              var container = document.createElement('div');
-              container.className = 'border border-hl-border rounded p-3';
-              container.setAttribute('data-run-id', run.id);
-              container.innerHTML =
-                '<div class="flex justify-between items-center">' +
-                '<span class="text-xs text-hl-muted">run ' + run.id + '</span>' +
-                '<span class="agent-run-status text-xs">' + run.state + '</span>' +
-                '</div>' +
-                '<pre class="agent-run-transcript mt-2 text-xs whitespace-pre-wrap break-words max-h-64 overflow-y-auto"></pre>' +
-                '<button type="button" class="agent-run-stop text-hl-warn underline text-xs mt-1">stop</button>';
-              runsList.insertBefore(container, runsList.firstChild);
-              attachStop(container, run.id);
-              poll(run.id, container);
+              addRunCard(run, null);
               document.getElementById('agent-prompt').value = '';
             })
             .catch(function (err) {

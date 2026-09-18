@@ -26,12 +26,13 @@ type task struct {
 type agentRunState string
 
 const (
-	agentRunPending     agentRunState = "pending"
-	agentRunRunning     agentRunState = "running"
-	agentRunSucceeded   agentRunState = "succeeded"
-	agentRunFailed      agentRunState = "failed"
-	agentRunStopped     agentRunState = "stopped"
-	agentRunInterrupted agentRunState = "interrupted"
+	agentRunPending          agentRunState = "pending"
+	agentRunRunning          agentRunState = "running"
+	agentRunSucceeded        agentRunState = "succeeded"
+	agentRunFailed           agentRunState = "failed"
+	agentRunStopped          agentRunState = "stopped"
+	agentRunInterrupted      agentRunState = "interrupted"
+	agentRunAwaitingApproval agentRunState = "awaiting_approval"
 )
 
 // agentRun is one `claude` subprocess invocation for a task. Transcript is
@@ -74,6 +75,38 @@ func CreateTask(db *sql.DB, agentSessionID int64, prompt string) (task, error) {
 	`, agentSessionID, prompt).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &t.CreatedAt)
 	if err != nil {
 		return task{}, fmt.Errorf("creating task: %w", err)
+	}
+	return t, nil
+}
+
+// GetAgentSession looks up a single agent session by ID — the approve/deny
+// endpoint uses it to find which workspace a new, resumed Agent Run should
+// start against.
+func GetAgentSession(db *sql.DB, sessionID int64) (agentSession, error) {
+	if db == nil {
+		return agentSession{}, fmt.Errorf("postgres unavailable")
+	}
+	var s agentSession
+	err := db.QueryRow(`
+		SELECT id, workspace_id, created_at FROM agent_sessions WHERE id = $1
+	`, sessionID).Scan(&s.ID, &s.WorkspaceID, &s.CreatedAt)
+	if err != nil {
+		return agentSession{}, fmt.Errorf("getting agent session %d: %w", sessionID, err)
+	}
+	return s, nil
+}
+
+// GetTask looks up a single task by ID.
+func GetTask(db *sql.DB, taskID int64) (task, error) {
+	if db == nil {
+		return task{}, fmt.Errorf("postgres unavailable")
+	}
+	var t task
+	err := db.QueryRow(`
+		SELECT id, agent_session_id, prompt, created_at FROM tasks WHERE id = $1
+	`, taskID).Scan(&t.ID, &t.AgentSessionID, &t.Prompt, &t.CreatedAt)
+	if err != nil {
+		return task{}, fmt.Errorf("getting task %d: %w", taskID, err)
 	}
 	return t, nil
 }
@@ -163,9 +196,14 @@ func UpdateAgentRunState(db *sql.DB, runID int64, state agentRunState, transcrip
 	return nil
 }
 
+// isTerminalAgentRunState reports whether the subprocess behind a run has
+// finished (and finished_at should be stamped) — agentRunAwaitingApproval
+// counts, since it's only ever reached after cmd.Wait() has already
+// returned (see agentprocess.go), even though a denial can still move a run
+// on from there to agentRunFailed.
 func isTerminalAgentRunState(s agentRunState) bool {
 	switch s {
-	case agentRunSucceeded, agentRunFailed, agentRunStopped, agentRunInterrupted:
+	case agentRunSucceeded, agentRunFailed, agentRunStopped, agentRunInterrupted, agentRunAwaitingApproval:
 		return true
 	default:
 		return false

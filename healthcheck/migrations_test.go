@@ -32,14 +32,17 @@ func TestMigrationNames(t *testing.T) {
 		t.Fatalf("migrationNames() = %v, want nil error", err)
 	}
 
-	if len(names) < 2 {
-		t.Fatalf("migrationNames() = %v, want at least 2 migrations", names)
+	if len(names) < 3 {
+		t.Fatalf("migrationNames() = %v, want at least 3 migrations", names)
 	}
 	if names[0] != "0001_create_workspaces.sql" {
 		t.Errorf("migrationNames()[0] = %q, want %q", names[0], "0001_create_workspaces.sql")
 	}
 	if names[1] != "0002_create_agent_tables.sql" {
 		t.Errorf("migrationNames()[1] = %q, want %q", names[1], "0002_create_agent_tables.sql")
+	}
+	if names[2] != "0003_create_approvals.sql" {
+		t.Errorf("migrationNames()[2] = %q, want %q", names[2], "0003_create_approvals.sql")
 	}
 	for i := 1; i < len(names); i++ {
 		if names[i-1] >= names[i] {
@@ -58,7 +61,7 @@ func TestMigrationNames(t *testing.T) {
 // from a clean slate regardless of what a previous run left behind.
 func resetSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"agent_runs", "tasks", "agent_sessions", "workspaces", "schema_migrations"} {
+	for _, table := range []string{"approvals", "agent_runs", "tasks", "agent_sessions", "workspaces", "schema_migrations"} {
 		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
 			t.Fatalf("resetting %s table: %v", table, err)
 		}
@@ -73,7 +76,7 @@ func TestRunMigrations(t *testing.T) {
 		t.Fatalf("runMigrations() = %v, want nil", err)
 	}
 
-	for _, table := range []string{"workspaces", "agent_sessions", "tasks", "agent_runs"} {
+	for _, table := range []string{"workspaces", "agent_sessions", "tasks", "agent_runs", "approvals"} {
 		var count int
 		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Errorf("querying %s after migration: %v", table, err)
@@ -82,6 +85,39 @@ func TestRunMigrations(t *testing.T) {
 
 	if err := runMigrations(db); err != nil {
 		t.Fatalf("second runMigrations() = %v, want nil (idempotent)", err)
+	}
+}
+
+// TestAgentRunsStateCheck_AllowsAwaitingApproval confirms migration 0003
+// actually extended the CHECK constraint (drop+recreate, not just adding a
+// new value on paper) — a raw SQL update here rather than going through
+// UpdateAgentRunState, since this test's job is to verify the schema
+// itself, independent of the Go repository layer built on top of it.
+func TestAgentRunsStateCheck_AllowsAwaitingApproval(t *testing.T) {
+	db := testDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	workspaceID := seedWorkspace(t, db, "migration-approval-state-check")
+	session, err := CreateAgentSession(db, workspaceID)
+	if err != nil {
+		t.Fatalf("CreateAgentSession() = %v, want nil", err)
+	}
+	tk, err := CreateTask(db, session.ID, "prompt")
+	if err != nil {
+		t.Fatalf("CreateTask() = %v, want nil", err)
+	}
+	run, err := CreateAgentRun(db, tk.ID)
+	if err != nil {
+		t.Fatalf("CreateAgentRun() = %v, want nil", err)
+	}
+
+	if _, err := db.Exec(`UPDATE agent_runs SET state = 'awaiting_approval' WHERE id = $1`, run.ID); err != nil {
+		t.Errorf("UPDATE agent_runs SET state = 'awaiting_approval' = %v, want nil (CHECK constraint should allow it)", err)
+	}
+
+	if _, err := db.Exec(`UPDATE agent_runs SET state = 'not_a_real_state' WHERE id = $1`, run.ID); err == nil {
+		t.Error("UPDATE agent_runs SET state = 'not_a_real_state' = nil error, want the CHECK constraint to still reject unknown values")
 	}
 }
 
