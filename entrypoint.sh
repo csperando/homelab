@@ -17,13 +17,6 @@ if [ -d /opt/claude-defaults/skills ]; then
   cp -r /opt/claude-defaults/skills /root/.claude/skills
 fi
 
-# Unlike the seed step above, this state is ephemeral live-status (which
-# Claude Code subagents are currently running, written by the
-# SubagentStart/SubagentStop hooks) and must not survive a restart, so it's
-# deliberately reset on every boot rather than preserved.
-rm -rf /root/.claude/agents/running
-mkdir -p /root/.claude/agents/running
-
 /usr/local/bin/homelab-healthcheck &
 
 exec "$@"

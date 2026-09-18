@@ -2,6 +2,7 @@
 tmp/
 bin/
 .env
+.env.production
 /healthcheck/healthcheck
 /volume/*
 !/volume/.gitkeep
