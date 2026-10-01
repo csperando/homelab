@@ -162,5 +162,24 @@ jobs:
             exit 1
           fi
 
+      # `up -d` doesn't recreate nginx when only its bind-mounted conf.d
+      # changed, so it would keep serving the old config. Validate + reload
+      # so config changes ship with this deploy; an invalid config fails the
+      # job and leaves nginx on its last good config. Runs after "verify
+      # deployment", which checks homelab on :55123 directly, not via nginx.
+      - name: reload nginx config
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          compose="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+          if ! $compose exec -T nginx true 2>/dev/null; then
+            echo "nginx not running - restarting it to load the new config"
+            $compose restart nginx
+          elif ! $compose exec -T nginx nginx -t; then
+            echo "::error::nginx config test failed - still serving the previous config"
+            exit 1
+          else
+            $compose exec -T nginx nginx -s reload || $compose restart nginx
+          fi
+
       - name: prune dangling images
         run: docker image prune -f
