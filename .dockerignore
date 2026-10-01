@@ -1,10 +1,12 @@
 .git
+**/.git
 *.md
 .DS_Store
-!.claude/**/*.md
 healthcheck/healthcheck
 
 # Runtime state — bind-mounted at run time, never wanted in the build context
 volume
-# Ephemeral skill working files (goal.md/plan.md re-included by the rule above)
-.claude/tmp
+# This repo's own Claude Code config (dev skills, tmp files) — the container's
+# config comes from bit-brain/ instead (`*.md` above only matches at the
+# context root, so bit-brain/**/*.md is still included)
+.claude

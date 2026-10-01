@@ -16,7 +16,7 @@ Via `make` (preferred):
 
 ```sh
 make start    # clean build run — full reset
-make build    # docker compose build
+make build    # update skills submodule to latest, then docker compose build
 make run      # start/resume the container (seeds .env from .env.sample if missing)
 make shell    # docker exec -it homelab bash
 make stop     # docker compose stop
@@ -48,12 +48,22 @@ NodeSource, since Ubuntu's packaged Node is too old for current pnpm/tooling) �
 (`dlv`, `golangci-lint`) → `pnpm` → Claude Code CLI → the healthcheck binary (built
 in-image from `healthcheck/`) → `entrypoint.sh`.
 
-Claude Code's defaults (`.claude/skills/`, and `.claude/settings.local.json` if present —
-that file is untracked, blanket-ignored by convention since it can hold machine-specific
-config like absolute paths, but still gets baked in from whatever's on disk at build time
-on the machine running `docker build`) are `COPY`'d to `/opt/claude-defaults`, *not*
-directly to `/root/.claude` — that path is bind-mounted at runtime (see below), so
-anything placed there at build time would be shadowed by the mount.
+The container's Claude Code config lives in `bit-brain/` (user-level `CLAUDE.md`, skills,
+hooks, a `settings.json` seed) — deliberately separate from this repo's own `.claude/`,
+which is only for developing homelab itself and is excluded from the build context via
+`.dockerignore`. `bit-brain/` is `COPY`'d to `/opt/bit-brain`, *not* directly to
+`/root/.claude` — that path is bind-mounted at runtime (see below), so anything placed
+there at build time would be shadowed by the mount; `entrypoint.sh` syncs it in instead.
+
+Skills come from two sources, merged at build time into `/opt/bit-brain/skills/<name>`
+(the only layout `~/.claude/skills` discovers): our own in `bit-brain/skills/` (optional),
+plus the `bit-brain/mattpocock-skills` git submodule (mattpocock/skills, tracking `main`)
+— only the promoted skills listed in its `.claude-plugin/plugin.json`, flattened out of
+its `skills/<bucket>/<name>` layout. A name collision between the two fails the build, as
+does an uninitialized submodule. Every build uses upstream's latest: `make build`
+(via `make skills-update`) runs `git submodule update --init --remote --rebase` first, and
+CI/deploy run the same before building — so the pinned submodule commit in git is only a
+fallback (raw `docker compose build` skips the update and uses whatever's checked out).
 
 ### Runtime composition (`docker-compose.yml` + `services/*/compose.yml`)
 
@@ -114,18 +124,19 @@ anything placed there at build time would be shadowed by the mount.
 ### entrypoint.sh
 
 Runs before the container's `CMD`. Responsibilities, in order:
-1. Seed `/root/.claude` from the baked-in `/opt/claude-defaults` using `cp -rn` (no
-   clobber) — populates default settings/skills on first boot without ever overwriting
-   runtime state (credentials, sessions) already present in the mounted volume.
-2. Force-refresh only `/root/.claude/skills/` from the image (`rm -rf` + `cp -r`). Skills
-   are image-managed, not runtime state; the `cp -rn` above would otherwise leave a stale
-   copy from an earlier image in the mounted volume, so a freshly pulled image never
-   updated them. Credentials / sessions / settings are untouched.
-3. Ensure `/root/.claude/claude.json` exists and is valid JSON (`{}` minimum — an empty
+1. Sync `/opt/bit-brain` into `/root/.claude` by a fixed allowlist. Image-owned paths
+   (`CLAUDE.md`, `skills`, `hooks`, `agents`, `commands`, `output-styles`) are `rm -rf`'d
+   and re-copied every boot, so edits *and deletions* in `bit-brain/` reach an existing
+   volume — and anything created at those paths at runtime is discarded on restart (edit
+   `bit-brain/` and rebuild instead). `settings.json`/`settings.local.json` are runtime-
+   owned (Claude Code writes to them): seeded with `cp -n` on first boot, never
+   overwritten. Any other `bit-brain/` entry is ignored with a warning, so nothing can
+   clobber credentials, sessions, or project memory.
+2. Ensure `/root/.claude/claude.json` exists and is valid JSON (`{}` minimum — an empty
    file causes a JSON parse error at Claude Code startup), then symlink the root-level
    `/root/.claude.json` to it, since that file lives outside `/root/.claude` but needs the
    same persistence.
-4. Start `homelab-healthcheck` in the background, then `exec` the container's `CMD`.
+3. Start `homelab-healthcheck` in the background, then `exec` the container's `CMD`.
 
 ### Health/dashboard API (`healthcheck/`, port `55123`)
 

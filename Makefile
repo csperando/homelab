@@ -6,9 +6,14 @@ PROD_COMPOSE := -f docker-compose.yml -f docker-compose.prod.yml
 HOMELAB_TAG ?= latest
 export HOMELAB_TAG
 
-.PHONY: build run stop restart shell logs clean test deploy prod-config
+.PHONY: build skills-update run stop restart shell logs clean test deploy prod-config
 
-build:
+# Always build against the latest upstream skills (see bit-brain/ in CLAUDE.md).
+# --rebase keeps any local commits made inside the submodule.
+skills-update:
+	git submodule update --init --remote --rebase bit-brain/mattpocock-skills
+
+build: skills-update
 	docker compose build
 
 test:

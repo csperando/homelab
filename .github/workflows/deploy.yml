@@ -26,6 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Build against upstream's latest skills, not the pinned submodule commit.
+      - name: update skills submodule
+        run: git submodule update --init --remote bit-brain/mattpocock-skills
+
       - id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 

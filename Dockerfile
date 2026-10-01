@@ -30,10 +30,30 @@ RUN npm install -g pnpm
 
 # Claude
 RUN npm install -g @anthropic-ai/claude-code
-# Baked-in defaults (settings, skills) — seeded into /root/.claude at container
-# start rather than COPY'd there directly, since that path is bind-mounted at
-# runtime to persist auth/session state across container recreation.
-COPY .claude /opt/claude-defaults
+# Container's Claude config (CLAUDE.md, skills, hooks, settings seed) — synced
+# into /root/.claude by entrypoint.sh at container start rather than COPY'd
+# there directly, since that path is bind-mounted at runtime to persist
+# auth/session state across container recreation.
+COPY bit-brain /opt/bit-brain
+# Flatten the mattpocock-skills submodule's promoted skills (nested as
+# skills/<bucket>/<name>, listed in its plugin.json) into skills/<name>, the
+# only layout ~/.claude/skills discovers, alongside any of our own skills. A
+# name collision fails the build rather than silently overwriting one.
+RUN set -e; src=/opt/bit-brain/mattpocock-skills; \
+    if [ ! -f "$src/.claude-plugin/plugin.json" ]; then \
+      echo "bit-brain/mattpocock-skills is empty — run: git submodule update --init" >&2; exit 1; \
+    fi; \
+    skills="$(node -p "require('$src/.claude-plugin/plugin.json').skills.join(' ')")"; \
+    if [ -z "$skills" ]; then echo "mattpocock-skills plugin.json lists no skills" >&2; exit 1; fi; \
+    mkdir -p /opt/bit-brain/skills; \
+    for dir in $skills; do \
+      name="$(basename "$dir")"; \
+      if [ -e "/opt/bit-brain/skills/$name" ]; then \
+        echo "skill name collision: $name (bit-brain/skills vs mattpocock-skills)" >&2; exit 1; \
+      fi; \
+      cp -a "$src/$dir" "/opt/bit-brain/skills/$name"; \
+    done; \
+    rm -rf "$src"
 
 # Lightweight Go API providing container healthchecks
 COPY healthcheck /root/healthcheck

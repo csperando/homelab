@@ -1,0 +1,4 @@
+[submodule "bit-brain/mattpocock-skills"]
+	path = bit-brain/mattpocock-skills
+	url = https://github.com/mattpocock/skills.git
+	branch = main
