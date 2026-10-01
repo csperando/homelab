@@ -104,6 +104,11 @@ the fallback pin, if ever wanted, needs `git add -f bit-brain/mattpocock-skills`
   `build:` for `image: ghcr.io/csperando/homelab:${HOMELAB_TAG:-latest}` and adds
   `restart: unless-stopped` to the infra services. Applied via `make deploy` (which passes
   both `-f` files). Local dev never uses it.
+- nginx (`services/nginx/conf.d`) proxies the dashboard on `:8080` and must forward
+  `Host $http_host` (not `$host`, which strips the port and breaks `withCSRF`'s
+  `Origin`-vs-`Host` check). Its config is a bind mount, so `up -d` alone doesn't apply
+  changes: the deploy workflow validates and reloads it, and locally a full `make start`
+  (not `make run`) recreates it.
 
 ### CI/CD and server deployment
 
@@ -116,7 +121,8 @@ the fallback pin, if ever wanted, needs `git add -f bit-brain/mattpocock-skills`
   `:sha-<short>` to GHCR, then a `deploy` job **on a self-hosted runner on the dev server**
   preflight-checks the host, syncs the compose files into `~/homelab` (the runner user's
   home — no `sudo`), writes `.env` from the `ENV` repo secret, runs `docker compose pull` +
-  `up -d` pinned to the new `sha-<short>`, and health-checks it. The self-hosted job is
+  `up -d` pinned to the new `sha-<short>`, health-checks it, then validates and reloads
+  nginx's config. The self-hosted job is
   gated to `push`/`dispatch` on this repo — never PRs (RCE risk). Host bootstrap (the one
   `sudo` step + runner install) is `scripts/bootstrap-server.sh`.
 - `.github/workflows/registry-cleanup.yml` — weekly; trims old `sha-*` tags (needs a
@@ -162,7 +168,18 @@ A small embedded Go HTTP service, split by concern:
   `SetWorkspaceGitHubIssuePolling` — see the GitHub issue polling paragraph below), and
   `/files/` (a file server restricted to serving only paths that pass through a directory
   literally named `coverage` — see `isCoveragePath`/`coverageOnly` — not general
-  workspace file access).
+  workspace file access). Routes are registered in `newMux`; every browser-facing route is
+  wrapped `withCSRF(withAuth(...))` — exempt are `/healthz` and the hook endpoint (the
+  `claude` subprocess has no browser `Origin`; it authenticates via `AGENT_HOOK_SECRET`).
+- `csrf.go` — `withCSRF`, a stdlib copy of Go 1.25's `http.CrossOriginProtection` (the
+  image's Go 1.22 lacks it): non-GET/HEAD/OPTIONS requests are allowed only if
+  `Sec-Fetch-Site` is `same-origin`/`none`, or — when browsers omit that header, as they do
+  for plain-HTTP non-localhost origins like the server's LAN address over the VPN — if
+  `Origin`'s host:port equals `Host`; else 403. Needed because Basic Auth doesn't stop CSRF
+  (browsers attach cached credentials) and `withAuth` fails open when unconfigured.
+  Requests with neither header (curl/scripts) pass. Proxy headers like
+  `X-Forwarded-Host` are never trusted. Known gap: DNS rebinding against an auth-disabled
+  dashboard isn't covered.
 - `status.go` — gathers the status payload: tool versions, workspace disk usage, memory,
   load average, and a one-level-deep scan of `/root/workspace` for git repos (branch,
   dirty state).
