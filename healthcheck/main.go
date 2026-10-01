@@ -736,29 +736,40 @@ func main() {
 		startGitHubIssuePoller(db)
 	}
 
-	http.HandleFunc("/healthz", handleHealthz)
-	http.Handle("/api/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIStatus)))
-	http.Handle("/", withAuth(adminUser, adminPass, http.HandlerFunc(handleDashboard)))
-	http.Handle("/workspaces", withAuth(adminUser, adminPass, http.HandlerFunc(handleWorkspaces)))
-	http.Handle("/api/workspaces/clone", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesClone)))
-	http.Handle("/api/workspaces/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesStatus)))
-	http.Handle("/api/workspaces/polling", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIWorkspacesPolling)))
-	http.Handle("/agents", withAuth(adminUser, adminPass, http.HandlerFunc(handleAgents)))
-	http.Handle("/api/agents/start", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStart)))
-	http.Handle("/api/agents/status", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStatus)))
-	http.Handle("/api/agents/stop", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsStop)))
-	// Deliberately not wrapped in withAuth: the claude subprocess has no
-	// dashboard credentials and authenticates via agentHookSecret instead
-	// (see handleAPIAgentsPreToolUseHook).
-	http.HandleFunc("/api/agents/hooks/pre-tool-use", handleAPIAgentsPreToolUseHook)
-	http.Handle("/api/agents/approvals/decide", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPIAgentsApprovalsDecide)))
-	http.Handle("/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleLogs)))
-	http.Handle("/api/logs", withAuth(adminUser, adminPass, http.HandlerFunc(handleAPILogs)))
-	http.Handle("/files/", withAuth(adminUser, adminPass, http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
-
 	addr := ":55123"
 	log.Printf("homelab-healthcheck listening on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := http.ListenAndServe(addr, newMux(adminUser, adminPass)); err != nil {
 		log.Fatalf("healthcheck server failed: %v", err)
 	}
+}
+
+// newMux registers every route. Browser-facing routes are wrapped in
+// withCSRF outermost — outside withAuth, so a cross-site request is
+// rejected whether or not auth is configured.
+func newMux(adminUser, adminPass string) *http.ServeMux {
+	mux := http.NewServeMux()
+	browser := func(h http.Handler) http.Handler {
+		return withCSRF(withAuth(adminUser, adminPass, h))
+	}
+
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.Handle("/api/status", browser(http.HandlerFunc(handleAPIStatus)))
+	mux.Handle("/", browser(http.HandlerFunc(handleDashboard)))
+	mux.Handle("/workspaces", browser(http.HandlerFunc(handleWorkspaces)))
+	mux.Handle("/api/workspaces/clone", browser(http.HandlerFunc(handleAPIWorkspacesClone)))
+	mux.Handle("/api/workspaces/status", browser(http.HandlerFunc(handleAPIWorkspacesStatus)))
+	mux.Handle("/api/workspaces/polling", browser(http.HandlerFunc(handleAPIWorkspacesPolling)))
+	mux.Handle("/agents", browser(http.HandlerFunc(handleAgents)))
+	mux.Handle("/api/agents/start", browser(http.HandlerFunc(handleAPIAgentsStart)))
+	mux.Handle("/api/agents/status", browser(http.HandlerFunc(handleAPIAgentsStatus)))
+	mux.Handle("/api/agents/stop", browser(http.HandlerFunc(handleAPIAgentsStop)))
+	// Deliberately not wrapped in withAuth or withCSRF: the claude subprocess
+	// has no dashboard credentials and no browser Origin, and authenticates
+	// via agentHookSecret instead (see handleAPIAgentsPreToolUseHook).
+	mux.HandleFunc("/api/agents/hooks/pre-tool-use", handleAPIAgentsPreToolUseHook)
+	mux.Handle("/api/agents/approvals/decide", browser(http.HandlerFunc(handleAPIAgentsApprovalsDecide)))
+	mux.Handle("/logs", browser(http.HandlerFunc(handleLogs)))
+	mux.Handle("/api/logs", browser(http.HandlerFunc(handleAPILogs)))
+	mux.Handle("/files/", browser(http.StripPrefix("/files/", coverageOnly(http.FileServer(http.Dir(workspaceDir))))))
+	return mux
 }

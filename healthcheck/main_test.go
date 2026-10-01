@@ -1271,3 +1271,78 @@ func TestHandleAPIAgentsApprovalsDecide_Approve_CarriesGitHubIssueNumber(t *test
 		t.Errorf("newTask.GitHubIssueNumber = %v, want pointer to 99 (carried from the original task)", newTask.GitHubIssueNumber)
 	}
 }
+
+// newMux must put withCSRF in front of every browser-facing state-changing
+// endpoint, in both auth modes, so a cross-site post is rejected before it
+// reaches the handler (or withAuth, which fails open when unconfigured).
+func TestNewMux_RejectsCrossSitePosts(t *testing.T) {
+	endpoints := []string{
+		"/api/agents/start",
+		"/api/agents/stop",
+		"/api/agents/approvals/decide",
+		"/api/workspaces/clone",
+		"/api/workspaces/polling",
+	}
+	modes := []struct {
+		name       string
+		user, pass string
+	}{
+		{"auth configured", "admin", "secret"},
+		{"auth disabled", "", ""},
+	}
+
+	for _, mode := range modes {
+		mux := newMux(mode.user, mode.pass)
+		for _, path := range endpoints {
+			t.Run(mode.name+" "+path, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("workspace=x&prompt=y&run=1&approval=1&decision=approve"))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("Origin", "http://evil.example")
+				req.Header.Set("Sec-Fetch-Site", "cross-site")
+				if mode.user != "" {
+					req.SetBasicAuth(mode.user, mode.pass)
+				}
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "cross-origin request rejected") {
+					t.Errorf("status = %d, body = %q; want 403 cross-origin request rejected", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// A same-origin post must get past withCSRF to the real handler.
+func TestNewMux_AllowsSameOriginPost(t *testing.T) {
+	mux := newMux("", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/polling", strings.NewReader("workspace=x"))
+	req.Host = "localhost:8080"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://localhost:8080")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("same-origin post rejected: status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+// The approval hook is called by the claude subprocess, not a browser, and
+// must stay exempt from withCSRF: a cross-site-looking request with a valid
+// secret still reaches the handler (here failing on the bad payload, 400).
+func TestNewMux_HookExemptFromCSRF(t *testing.T) {
+	withAgentHookSecret(t, "the-real-secret")
+	mux := newMux("admin", "secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/hooks/pre-tool-use", strings.NewReader("not-json"))
+	req.Header.Set("Authorization", "Bearer the-real-secret")
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (handler reached, payload rejected)", rec.Code)
+	}
+}
