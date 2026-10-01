@@ -60,10 +60,13 @@ Skills come from two sources, merged at build time into `/opt/bit-brain/skills/<
 plus the `bit-brain/mattpocock-skills` git submodule (mattpocock/skills, tracking `main`)
 — only the promoted skills listed in its `.claude-plugin/plugin.json`, flattened out of
 its `skills/<bucket>/<name>` layout. A name collision between the two fails the build, as
-does an uninitialized submodule. Every build uses upstream's latest: `make build`
-(via `make skills-update`) runs `git submodule update --init --remote --rebase` first, and
-CI/deploy run the same before building — so the pinned submodule commit in git is only a
-fallback (raw `docker compose build` skips the update and uses whatever's checked out).
+does an uninitialized submodule. Every build uses upstream's latest: local `make build`
+(via `make skills-update`) runs `git submodule update --init --remote --rebase` first (a
+failure only warns, building with what's checked out), and CI/deploy run the same
+(without `--rebase`) right after checkout. The pinned commit in git is only a fallback
+(fresh clone, raw `docker compose build`). `.gitmodules` sets `ignore = all`, so the
+moving checkout never shows in `git status`/`diff` or gets swept into `commit -a`; bumping
+the fallback pin, if ever wanted, needs `git add -f bit-brain/mattpocock-skills`.
 
 ### Runtime composition (`docker-compose.yml` + `services/*/compose.yml`)
 

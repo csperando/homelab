@@ -8,10 +8,12 @@ export HOMELAB_TAG
 
 .PHONY: build skills-update run stop restart shell logs clean test deploy prod-config
 
-# Always build against the latest upstream skills (see bit-brain/ in CLAUDE.md).
-# --rebase keeps any local commits made inside the submodule.
+# Local builds use the latest upstream skills (see bit-brain/ in CLAUDE.md).
+# --rebase keeps any local commits made inside the submodule. Never fatal:
+# offline or a conflict just builds with the checked-out version.
 skills-update:
-	git submodule update --init --remote --rebase bit-brain/mattpocock-skills
+	@git submodule update --init --remote --rebase bit-brain/mattpocock-skills \
+		|| echo "warning: skills update failed — building with the checked-out version" >&2
 
 build: skills-update
 	docker compose build

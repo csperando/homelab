@@ -2,3 +2,4 @@
 	path = bit-brain/mattpocock-skills
 	url = https://github.com/mattpocock/skills.git
 	branch = main
+	ignore = all
