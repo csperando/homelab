@@ -218,7 +218,9 @@ A small embedded Go HTTP service, split by concern:
   nil) is passed explicitly to callers rather than referenced implicitly, unlike
   `githubHTTPClient`/`dockerHTTPClient`.
 - `migrations.go` + `migrations/*.sql` — an embedded (`go:embed`) SQL migration runner,
-  applied idempotently at startup (tracked in a `schema_migrations` table) before the HTTP
+  applied idempotently at startup (tracked in `homelab_schema_migrations` — prefixed so it
+  can't collide with workspace projects' own `schema_migrations` in the shared database; a
+  pre-rename install's rows are moved over once by `adoptLegacyMigrations`) before the HTTP
   server starts serving. A migration failure is fatal (`log.Fatalf`) — distinct from
   Postgres simply being unreachable, which degrades instead.
 - `workspaces.go` — the `workspaces` table's repository layer (`UpsertWorkspace`,

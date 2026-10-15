@@ -64,7 +64,7 @@ func TestMigrationNames(t *testing.T) {
 // from a clean slate regardless of what a previous run left behind.
 func resetSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"approvals", "agent_runs", "tasks", "agent_sessions", "workspaces", "schema_migrations"} {
+	for _, table := range []string{"approvals", "agent_runs", "tasks", "agent_sessions", "workspaces", migrationsTable, legacyMigrationsTable} {
 		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
 			t.Fatalf("resetting %s table: %v", table, err)
 		}
@@ -171,5 +171,128 @@ func TestApplyMigration_UnknownName(t *testing.T) {
 
 	if err := applyMigration(db, "9999_does_not_exist.sql"); err == nil {
 		t.Fatal("applyMigration() with an unknown name = nil error, want an error")
+	}
+}
+
+// appliedNamesIn returns the migration names recorded in table, sorted.
+func appliedNamesIn(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM ` + table + ` ORDER BY name`)
+	if err != nil {
+		t.Fatalf("reading %s: %v", table, err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scanning %s: %v", table, err)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+func tableExists(t *testing.T, db *sql.DB, table string) bool {
+	t.Helper()
+	var exists bool
+	if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
+		t.Fatalf("checking %s exists: %v", table, err)
+	}
+	return exists
+}
+
+// TestRunMigrations_UsesHomelabTable confirms tracking goes to the
+// homelab-prefixed table, leaving the generic schema_migrations name free
+// for workspace projects sharing this database.
+func TestRunMigrations_UsesHomelabTable(t *testing.T) {
+	db := testDB(t)
+	resetSchema(t, db)
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	want, _ := migrationNames()
+	if got := appliedNamesIn(t, db, migrationsTable); len(got) != len(want) {
+		t.Errorf("%s = %v, want %v", migrationsTable, got, want)
+	}
+	if tableExists(t, db, legacyMigrationsTable) {
+		t.Errorf("%s exists after a fresh runMigrations, want it left alone (absent)", legacyMigrationsTable)
+	}
+}
+
+// TestRunMigrations_AdoptsLegacyTable simulates a database migrated before
+// the rename: schema already applied, tracked in schema_migrations. The
+// rows must carry over (no "relation already exists" re-apply) and the
+// emptied legacy table must be dropped.
+func TestRunMigrations_AdoptsLegacyTable(t *testing.T) {
+	db := testDB(t)
+	resetSchema(t, db)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE ` + migrationsTable + ` RENAME TO ` + legacyMigrationsTable); err != nil {
+		t.Fatalf("simulating legacy table: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() over a legacy table = %v, want nil", err)
+	}
+
+	want, _ := migrationNames()
+	if got := appliedNamesIn(t, db, migrationsTable); len(got) != len(want) {
+		t.Errorf("%s = %v, want %v", migrationsTable, got, want)
+	}
+	if tableExists(t, db, legacyMigrationsTable) {
+		t.Errorf("%s still exists, want it dropped once emptied", legacyMigrationsTable)
+	}
+}
+
+// TestRunMigrations_LegacyTableWithForeignRows: a legacy table that also
+// holds another tool's rows keeps them (and is not dropped) — only this
+// package's own migration names are moved.
+func TestRunMigrations_LegacyTableWithForeignRows(t *testing.T) {
+	db := testDB(t)
+	resetSchema(t, db)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE ` + migrationsTable + ` RENAME TO ` + legacyMigrationsTable); err != nil {
+		t.Fatalf("simulating legacy table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ` + legacyMigrationsTable + ` (name) VALUES ('20260101_someone_elses.sql')`); err != nil {
+		t.Fatalf("seeding foreign row: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	if got := appliedNamesIn(t, db, legacyMigrationsTable); len(got) != 1 || got[0] != "20260101_someone_elses.sql" {
+		t.Errorf("%s = %v, want only the foreign row left", legacyMigrationsTable, got)
+	}
+}
+
+// TestRunMigrations_IgnoresForeignSchemaMigrations: a workspace project's
+// own schema_migrations with a different shape (golang-migrate style) must
+// be left completely untouched.
+func TestRunMigrations_IgnoresForeignSchemaMigrations(t *testing.T) {
+	db := testDB(t)
+	resetSchema(t, db)
+	if _, err := db.Exec(`CREATE TABLE ` + legacyMigrationsTable + ` (version BIGINT PRIMARY KEY, dirty BOOLEAN NOT NULL)`); err != nil {
+		t.Fatalf("creating foreign table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ` + legacyMigrationsTable + ` VALUES (42, false)`); err != nil {
+		t.Fatalf("seeding foreign table: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() = %v, want nil", err)
+	}
+
+	var version int64
+	if err := db.QueryRow(`SELECT version FROM ` + legacyMigrationsTable).Scan(&version); err != nil || version != 42 {
+		t.Errorf("foreign %s row = %d, %v; want 42, nil", legacyMigrationsTable, version, err)
 	}
 }
